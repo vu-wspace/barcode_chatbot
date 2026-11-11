@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Barcode Scanner</title>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --muted:#667; --line:#dde1e6; --accent:#72b542; --err:#d64545; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --card:#1d2126; --fg:#e8ebee; --muted:#9aa3ad; --line:#2e343b; } }
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --muted:#667; --line:#dde1e6; --accent:#367018; --accent-fg:#367018; --err:#b42d2d; --err-fg:#b42d2d; --warn-fg:#946600; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --card:#1d2126; --fg:#e8ebee; --muted:#9aa3ad; --line:#2e343b; --accent-fg:#8fd16a; --err-fg:#ff7b7b; --warn-fg:#e0a800; } }
+  [hidden] { display:none !important; } /* display:flex rules below would otherwise override the hidden attribute */
   * { box-sizing: border-box; }
   body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
   main { max-width:720px; margin:0 auto; padding:16px; }
@@ -15,7 +16,9 @@
   .tabs { display:flex; gap:8px; margin-bottom:12px; }
   button, .btn { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:8px; padding:8px 14px; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }
   button.primary, .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .tabs button[aria-selected="true"] { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .tabs button[aria-selected="true"] { border-color:var(--accent-fg); color:var(--accent-fg); font-weight:600; }
+  button:disabled { opacity:.6; cursor:wait; }
+  :focus-visible { outline:2px solid var(--accent-fg); outline-offset:2px; }
   .stage { position:relative; background:#000; border-radius:10px; overflow:hidden; aspect-ratio:16/9; display:grid; place-items:center; }
   .stage video, .stage canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:fill; }
   .stage video[hidden] { display:none; }
@@ -26,7 +29,7 @@
   .guide { position:absolute; inset:22% 12%; border:2px dashed rgba(255,255,255,.5); border-radius:8px; z-index:1; pointer-events:none; }
   .stage.locked .guide { border:3px solid var(--accent); }
   #feedback { min-height:1.5em; margin:8px 0 0; color:var(--muted); }
-  #feedback.warn { color:#c98a00; } #feedback.ok { color:var(--accent); }
+  #feedback.warn { color:var(--warn-fg); } #feedback.ok { color:var(--accent-fg); }
   .drop { border:2px dashed var(--line); border-radius:10px; padding:28px; text-align:center; cursor:pointer; }
   .drop.over { border-color:var(--accent); }
   .drop img { max-width:100%; max-height:280px; }
@@ -38,22 +41,23 @@
   dl { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin:10px 0 0; } dt { color:var(--muted); } dd { margin:0; word-break:break-all; }
   ul.hist { list-style:none; padding:0; margin:8px 0 0; }
   ul.hist li { display:flex; gap:8px; align-items:center; padding:8px 0; border-top:1px solid var(--line); }
-  ul.hist li .v { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:ui-monospace, monospace; cursor:pointer; }
+  ul.hist li button.v { background:none; border:0; padding:4px 0; color:inherit; text-align:left; display:block; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:ui-monospace, monospace; cursor:pointer; }
   ul.hist li button { padding:4px 8px; }
   #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#222; color:#fff; padding:10px 16px; border-radius:8px; opacity:0; transition:opacity .2s; pointer-events:none; max-width:calc(100% - 32px); }
   #toast.show { opacity:1; } #toast.err { background:var(--err); }
   .prod { margin-top:10px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; }
-  .prod.none { color:var(--err); }
+  .prod.none { color:var(--err-fg); }
   ul.items { list-style:none; padding:0; margin:10px 0 0; }
   ul.items li { display:flex; gap:8px; padding:6px 0; border-top:1px solid var(--line); }
   ul.items li .n { margin-left:auto; font-family:ui-monospace, monospace; }
-  ul.items li.done .n { color:var(--accent); font-weight:600; }
-  ul.items li.over .n { color:var(--err); font-weight:600; }
+  ul.items li.done .n { color:var(--accent-fg); font-weight:600; }
+  ul.items li.over .n { color:var(--err-fg); font-weight:600; }
   .chat { display:flex; flex-direction:column; max-height:380px; overflow-y:auto; margin-top:8px; }
   .msg { padding:8px 12px; border-radius:10px; margin:4px 0; white-space:pre-wrap; max-width:90%; word-break:break-word; }
   .msg.me { background:var(--accent); color:#fff; align-self:flex-end; }
   .msg.ai { background:var(--bg); border:1px solid var(--line); align-self:flex-start; }
-  .msg.err { border-color:var(--err); color:var(--err); }
+  .msg.err { border-color:var(--err-fg); color:var(--err-fg); }
+  .msg button { margin-top:6px; padding:4px 10px; }
 </style>
 </head>
 <body>
@@ -62,11 +66,11 @@
 
   <section class="card">
     <div class="tabs" role="tablist">
-      <button role="tab" id="tabCam" aria-selected="true">📷 Camera</button>
-      <button role="tab" id="tabUp" aria-selected="false">📁 Upload image</button>
+      <button role="tab" id="tabCam" aria-selected="true" aria-controls="camMode" tabindex="0">📷 Camera</button>
+      <button role="tab" id="tabUp" aria-selected="false" aria-controls="upMode" tabindex="-1">📁 Upload image</button>
     </div>
 
-    <div id="camMode">
+    <div id="camMode" role="tabpanel" aria-labelledby="tabCam">
       <div class="stage" id="stage">
         <video id="video" playsinline muted hidden></video>
         <canvas id="overlay"></canvas>
@@ -75,16 +79,16 @@
         <div class="controls" id="controls" hidden>
           <button id="stopBtn" title="Stop camera" aria-label="Stop camera">✕</button>
           <button id="flipBtn" title="Flip camera" aria-label="Flip camera">🔄</button>
-          <button id="torchBtn" title="Toggle light" aria-label="Toggle light" hidden>🔦</button>
-          <button id="beepBtn" title="Sound on scan" aria-label="Sound on scan" class="on">🔊</button>
-          <button id="batchBtn" title="Batch mode (short pause between scans)" aria-label="Batch mode">⚡</button>
+          <button id="torchBtn" title="Toggle light" aria-label="Toggle light" aria-pressed="false" hidden>🔦</button>
+          <button id="beepBtn" title="Sound on scan" aria-label="Sound on scan" aria-pressed="true" class="on">🔊</button>
+          <button id="batchBtn" title="Batch mode (short pause between scans)" aria-label="Batch mode" aria-pressed="false">⚡</button>
         </div>
         <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" aria-label="Zoom" hidden>
       </div>
       <p id="feedback" aria-live="polite"></p>
     </div>
 
-    <div id="upMode" hidden>
+    <div id="upMode" role="tabpanel" aria-labelledby="tabUp" hidden>
       <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose or drop an image">
         <div id="dropText">Drop an image here or click to choose</div>
         <img id="preview" alt="" hidden>
@@ -102,7 +106,7 @@
     <strong>Đơn hàng đang đóng gói</strong>
     <form class="row" id="orderForm">
       <input type="text" id="orderId" placeholder="Mã đơn, vd SO-104587" aria-label="Mã đơn hàng">
-      <button class="primary">Tải đơn</button>
+      <button class="primary" id="orderLoad">Tải đơn</button>
       <button type="button" id="orderReset" hidden>Quét lại từ đầu</button>
     </form>
     <div id="order" hidden></div>
@@ -146,7 +150,7 @@
   };
   var NAMES = { qr_code:'QR Code', aztec:'Aztec', codabar:'Codabar', code_39:'Code 39', code_93:'Code 93', code_128:'Code 128', data_matrix:'Data Matrix', ean_8:'EAN-8', ean_13:'EAN-13', itf:'ITF', pdf417:'PDF417', upc_a:'UPC-A', upc_e:'UPC-E', asin:'ASIN', unknown:'Unknown' };
   var $ = function (id) { return document.getElementById(id); };
-  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: null };
+  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: null, starting: false, camSession: 0, orderReq: 0, orderLoading: false };
   var agree = ScanCore.createAgreement(CFG.requiredAgreement, CFG.agreeWindowMs);
 
   // --- storage (localStorage can throw in private mode) ---
@@ -180,27 +184,39 @@
 
   function setMode(cam) {
     $('tabCam').setAttribute('aria-selected', cam); $('tabUp').setAttribute('aria-selected', !cam);
+    $('tabCam').tabIndex = cam ? 0 : -1; $('tabUp').tabIndex = cam ? -1 : 0;
     $('camMode').hidden = !cam; $('upMode').hidden = cam;
-    if (!cam && S.scanning) stopCamera();
+    if (!cam && (S.scanning || S.starting)) stopCamera();
   }
+  function setToggle(btn, on) { btn.classList.toggle('on', on); btn.setAttribute('aria-pressed', on); }
 
   // --- camera ---
   function startCamera() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('Camera not available here (needs HTTPS). Upload an image or type the number.', true); return; }
+    if (S.starting || S.scanning) return;
+    var sid = ++S.camSession, CANCELLED = { cancelled: true };
+    var live = function () { if (sid !== S.camSession) throw CANCELLED; };
+    S.starting = true; $('startBtn').disabled = true; feedback('Starting camera…');
+    // the AudioContext must be created inside the click (user gesture), before any await
+    if (!S.audio) { try { S.audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
     ensureDetector().then(function () {
+      live();
       return navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: S.facing }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
     }).then(function (stream) {
+      if (sid !== S.camSession) { stream.getTracks().forEach(function (t) { t.stop(); }); throw CANCELLED; } // stopped while asking for permission
       S.stream = stream; S.track = stream.getVideoTracks()[0] || null;
       var v = $('video'); v.srcObject = stream; v.hidden = false;
       $('startBtn').hidden = true; $('controls').hidden = false; $('guide').hidden = false;
-      if (!S.audio) { try { S.audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} } // must be created inside a user gesture
       setupTrackControls();
       return v.play();
     }).then(function () {
+      live();
+      S.starting = false; $('startBtn').disabled = false;
       S.scanning = true; S.paused = false; agree.reset();
       feedback('Point your camera at a barcode');
       requestAnimationFrame(loop);
     }).catch(function (err) {
+      if (err === CANCELLED) return;
       var msg = err && err.name === 'NotAllowedError' ? 'Camera permission was denied.'
         : err && err.message === 'polyfill-failed' ? 'Could not load the barcode decoder.' : 'Could not start the camera.';
       toast(msg, true); stopCamera(); $('manual').focus();
@@ -208,9 +224,10 @@
   }
 
   function stopCamera() {
+    S.camSession++; S.starting = false; $('startBtn').disabled = false; // cancels a start still in progress
     S.scanning = false; S.paused = false; clearTimeout(S.pauseTimer);
     if (S.stream) S.stream.getTracks().forEach(function (t) { t.stop(); });
-    S.stream = S.track = null; S.torch = false;
+    S.stream = S.track = null; S.torch = false; setToggle($('torchBtn'), false);
     var v = $('video'); v.srcObject = null; v.hidden = true;
     $('startBtn').hidden = false; $('controls').hidden = true; $('guide').hidden = true; $('zoom').hidden = true;
     $('stage').classList.remove('locked'); drawBox(null); feedback('');
@@ -291,18 +308,22 @@
   }
 
   // --- upload ---
-  var upFile = null;
   function pickFile(f) {
     if (!f || f.type.indexOf('image/') !== 0) { toast('Please choose an image file', true); return; }
-    upFile = f;
-    var p = $('preview'); p.src = URL.createObjectURL(f); p.hidden = false; $('dropText').hidden = true;
-    p.onload = function () { scanImage(p); };
+    var p = $('preview'), dt = $('dropText');
+    if (p.src) URL.revokeObjectURL(p.src);
+    p.onload = function () { dt.hidden = true; p.hidden = false; scanImage(p); };
+    p.onerror = function () { p.hidden = true; dt.hidden = false; dt.textContent = 'Could not open this image. Choose another one.'; toast('Could not open this image', true); };
+    dt.hidden = false; dt.textContent = 'Reading image…';
+    p.src = URL.createObjectURL(f);
   }
   function scanImage(img) {
-    ensureDetector().then(function (d) { return d.detect(img); }).then(function (codes) {
-      if (codes.length) codes.forEach(function (c) { accept(c.rawValue, c.format, 'upload'); });
-      else toast('No barcode found in image', true);
-    }).catch(function () { toast('No barcode found in image', true); });
+    ensureDetector().then(function (d) {
+      return d.detect(img).then(function (codes) {
+        if (codes.length) codes.forEach(function (c) { accept(c.rawValue, c.format, 'upload'); });
+        else toast('No barcode found in image', true);
+      }, function () { toast('Could not read this image', true); });
+    }, function () { toast('Could not load the barcode decoder. Type the number instead.', true); });
   }
 
   // --- manual ---
@@ -315,7 +336,10 @@
   // --- results + history ---
   function accept(raw, fmt, source) {
     var n = ScanCore.normalizeCode(raw, fmt), value = n.value, format = n.format || ScanCore.formatFromValue(value), now = Date.now();
-    if (S.history[0] && S.history[0].value === value && now - S.history[0].ts < 2000) return; // dedupe double-fires
+    // Drops only double-fires of one read. Must stay below the batch pause (1200 ms) + agreement time, else a second
+    // unit of the same product is not counted.
+    if (S.history[0] && S.history[0].value === value && now - S.history[0].ts < 800) return;
+    if (S.orderLoading) { toast('Đang tải đơn, vui lòng quét lại sau', true); return; }
     S.history.unshift({ value: value, format: format, ts: now, source: source });
     S.history.length = Math.min(S.history.length, CFG.maxHistory);
     save(CFG.historyKey, S.history);
@@ -330,7 +354,11 @@
 
   // --- BE (via the gate at /api/) ---
   function getJson(url, opts) {
-    return fetch(url, opts).then(function (r) {
+    opts = opts || {};
+    var ctrl = window.AbortController ? new AbortController() : null, timer = ctrl && setTimeout(function () { ctrl.abort(); }, opts.timeoutMs || 15000);
+    return fetch(url, Object.assign({}, opts, { signal: ctrl && ctrl.signal })).catch(function (e) {
+      throw new Error(e && e.name === 'AbortError' ? 'quá thời gian chờ' : 'mất kết nối');
+    }).finally(function () { clearTimeout(timer); }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (b) { if (!r.ok) { var e = new Error(typeof b.detail === 'string' ? b.detail : 'HTTP ' + r.status); e.status = r.status; throw e; } return b; });
     });
   }
@@ -351,9 +379,18 @@
 
   // --- order checklist ---
   function loadOrder(id) {
-    getJson('/api/orders/' + encodeURIComponent(id)).then(function (o) {
+    var req = ++S.orderReq, btn = $('orderLoad');
+    S.orderLoading = true; btn.disabled = true; btn.textContent = 'Đang tải…';
+    getJson('/api/orders/' + encodeURIComponent(id), { timeoutMs: 15000 }).then(function (o) {
+      if (req !== S.orderReq) return; // a newer order was requested meanwhile
       S.order = o; S.scans = []; $('orderReset').hidden = false; renderOrder();
-    }).catch(function (e) { toast(e.status === 404 ? 'Không có đơn ' + id : 'Không tải được đơn (' + e.message + ')', true); });
+    }, function (e) {
+      if (req !== S.orderReq) return;
+      toast(e.status === 404 ? 'Không có đơn ' + id : 'Không tải được đơn (' + e.message + ')', true);
+    }).then(function () {
+      if (req !== S.orderReq) return;
+      S.orderLoading = false; btn.disabled = false; btn.textContent = 'Tải đơn';
+    });
   }
 
   function renderOrder() {
@@ -377,11 +414,20 @@
     $('chat').appendChild(d); $('chat').scrollTop = $('chat').scrollHeight; return d;
   }
   function askAI(text) {
-    bubble(text, 'me'); var reply = bubble('…', 'ai');
+    bubble(text, 'me'); sendAI(text, bubble('', 'ai'));
+  }
+  function sendAI(text, reply) {
+    reply.classList.remove('err'); reply.textContent = 'Đang chờ lượt…';
     aiQueue = aiQueue.then(function () {
-      return getJson('/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, thread_id: S.thread }) })
+      reply.textContent = 'Trợ lý đang trả lời…';
+      // below the gate's 180 s proxy timeout; a stuck request must not block the queue forever
+      return getJson('/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, timeoutMs: 120000, body: JSON.stringify({ message: text, thread_id: S.thread }) })
         .then(function (r) { S.thread = r.thread_id; reply.textContent = r.answer; })
-        .catch(function (e) { reply.classList.add('err'); reply.textContent = 'Trợ lý lỗi: ' + e.message; })
+        .catch(function (e) {
+          reply.classList.add('err'); reply.textContent = 'Trợ lý lỗi: ' + e.message + '\n';
+          var b = document.createElement('button'); b.type = 'button'; b.textContent = 'Thử lại';
+          b.onclick = function () { sendAI(text, reply); }; reply.appendChild(b);
+        })
         .then(function () { $('chat').scrollTop = $('chat').scrollHeight; });
     });
   }
@@ -408,7 +454,7 @@
   function renderHistory() {
     $('histEmpty').hidden = S.history.length > 0;
     $('hist').innerHTML = S.history.map(function (e, i) {
-      return '<li><span class="tag">' + esc(NAMES[e.format] || e.format) + '</span><span class="v" data-show="' + i + '" title="' + esc(e.value) + '">' + esc(e.value) + '</span>' +
+      return '<li><span class="tag">' + esc(NAMES[e.format] || e.format) + '</span><button type="button" class="v" data-show="' + i + '" title="' + esc(e.value) + '" aria-label="Show ' + esc(e.value) + '">' + esc(e.value) + '</button>' +
         '<button data-copy="' + esc(e.value) + '" aria-label="Copy">⧉</button><button data-del="' + i + '" aria-label="Delete">✕</button></li>';
     }).join('');
   }
@@ -425,14 +471,19 @@
   // --- wiring ---
   $('tabCam').onclick = function () { setMode(true); };
   $('tabUp').onclick = function () { setMode(false); };
+  $('tabCam').parentNode.onkeydown = function (e) {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].indexOf(e.key) === -1) return;
+    e.preventDefault(); var cam = e.key === 'Home' ? true : e.key === 'End' ? false : $('camMode').hidden;
+    setMode(cam); (cam ? $('tabCam') : $('tabUp')).focus();
+  };
   $('startBtn').onclick = startCamera;
   $('stopBtn').onclick = stopCamera;
   $('flipBtn').onclick = flipCamera;
-  $('torchBtn').onclick = function () { S.torch = !S.torch; this.classList.toggle('on', S.torch); applyConstraint({ torch: S.torch }); };
+  $('torchBtn').onclick = function () { S.torch = !S.torch; setToggle(this, S.torch); applyConstraint({ torch: S.torch }); };
   $('zoom').oninput = function () { applyConstraint({ zoom: parseFloat(this.value) }); };
   $('video').onclick = function () { applyConstraint({ focusMode: 'single-shot' }); };
-  $('beepBtn').onclick = function () { S.beep = !S.beep; this.textContent = S.beep ? '🔊' : '🔇'; this.classList.toggle('on', S.beep); save(CFG.settingsKey, { beep: S.beep, batch: S.batch }); };
-  $('batchBtn').onclick = function () { S.batch = !S.batch; this.classList.toggle('on', S.batch); save(CFG.settingsKey, { beep: S.beep, batch: S.batch }); };
+  $('beepBtn').onclick = function () { S.beep = !S.beep; this.textContent = S.beep ? '🔊' : '🔇'; setToggle(this, S.beep); save(CFG.settingsKey, { beep: S.beep, batch: S.batch }); };
+  $('batchBtn').onclick = function () { S.batch = !S.batch; setToggle(this, S.batch); save(CFG.settingsKey, { beep: S.beep, batch: S.batch }); };
   $('manualBtn').onclick = manual;
   $('manual').onkeydown = function (e) { if (e.key === 'Enter') manual(); };
   var drop = $('drop');
@@ -456,12 +507,12 @@
   $('copyAllBtn').onclick = function () { if (S.history.length) copy(S.history.map(function (e) { return e.value; }).join('\n')); };
   $('clearBtn').onclick = function () { if (S.history.length && confirm('Clear all scan history?')) { S.history = []; save(CFG.historyKey, []); renderHistory(); $('result').hidden = true; } };
   // Release the camera when the tab is hidden; Safari otherwise keeps the camera light on.
-  document.addEventListener('visibilitychange', function () { if (document.hidden && S.scanning) stopCamera(); });
+  document.addEventListener('visibilitychange', function () { if (document.hidden && (S.scanning || S.starting)) stopCamera(); });
 
   S.history = load(CFG.historyKey, []);
   var st = load(CFG.settingsKey, {});
-  if (st.beep === false) { S.beep = false; $('beepBtn').textContent = '🔇'; $('beepBtn').classList.remove('on'); }
-  if (st.batch) { S.batch = true; $('batchBtn').classList.add('on'); }
+  if (st.beep === false) { S.beep = false; $('beepBtn').textContent = '🔇'; setToggle($('beepBtn'), false); }
+  if (st.batch) { S.batch = true; setToggle($('batchBtn'), true); }
   renderHistory();
   ensureDetector().catch(function () {}); // warm up the WASM decoder so the first scan is fast
 })();
