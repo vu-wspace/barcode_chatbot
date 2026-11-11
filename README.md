@@ -189,7 +189,8 @@ docker compose up -d --build
 Mở http://localhost:8080, nhập đơn `SO-104587`, rồi quét hoặc gõ lần lượt `8935000100011`, `8935000200018`,
 `8935000300015`. Khung kết quả chuyển xanh khi đủ hàng.
 
-Dữ liệu mẫu (`be/app/seed.sql`): 6 sản phẩm, 2 đơn `SO-104587` (3 sản phẩm) và `SO-104588` (chuột ×2, Salonpas ×3).
+Dữ liệu mẫu (`be/app/seed.sql`): 7 sản phẩm, 3 đơn `SO-104587` (3 sản phẩm), `SO-104588` (chuột ×2, Salonpas ×3)
+và `X55277605433` (Salonpas ×1, vở ClassMate ×3, chuyển từ hệ thống `barcode_cv` cũ).
 
 > Mạng có SSL inspection (proxy công ty): đặt chứng chỉ CA (`*.crt`) vào `src/barcode_chatbot/agent/certs/` rồi build lại `ai`.
 > Thư mục này bị git bỏ qua.
@@ -264,9 +265,10 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 
 | Bộ test | Lệnh | Cần |
 |---|---|---|
-| Agent (44 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
+| Agent (48 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
 | Agent với Postgres | `TEST_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5433/barcode_chatbot uv run pytest` | DB đang chạy; dùng schema tạm rồi xóa |
 | BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test) |
+| Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |
 | Trang: logic quét + E2E Playwright (14 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
 
 Phạm vi E2E: kết luận do BE quyết định, QR chứa chữ không tới AI, SSE bị cắt giữa chừng, `error` → "Thử lại" với cùng

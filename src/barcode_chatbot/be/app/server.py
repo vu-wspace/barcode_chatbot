@@ -128,19 +128,25 @@ def setup_db():
     pool.open(wait=True, timeout=30)
     try:
         with pool.connection() as conn:
-            # Whole setup under one session lock (same key as migrate(), which re-enters it): two migrate runs at once
-            # used to race in provision_roles, both seeing no be_app and both running CREATE ROLE.
-            conn.execute("SELECT pg_advisory_lock(hashtext('barcode_chatbot.migrate'))")
-            conn.commit()  # a session lock outlives the transaction; leave no transaction open for migrate()
-            ran = migrate(conn)
-            print("applied migrations:", ", ".join(ran) or "none", flush=True)
-            if SEED_DEMO:
-                conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
-                conn.commit()
-            provision_roles(conn)
-            # no explicit unlock: the lock ends with the session when the pool closes, also after an error
+            print("applied migrations:", ", ".join(_setup(conn)) or "none", flush=True)
     finally:
         pool.close()
+
+
+def _setup(conn) -> list[str]:
+    # Whole setup under one session lock (same key as migrate(), which re-enters it): two migrate runs at once
+    # used to race in provision_roles, both seeing no be_app and both running CREATE ROLE.
+    conn.execute("SELECT pg_advisory_lock(hashtext('barcode_chatbot.migrate'))")
+    conn.commit()  # a session lock outlives the transaction; leave no transaction open for migrate()
+    try:
+        ran = migrate(conn)
+        if SEED_DEMO:
+            conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
+            conn.commit()
+        provision_roles(conn)
+        return ran
+    finally:
+        conn.execute("SELECT pg_advisory_unlock(hashtext('barcode_chatbot.migrate'))")  # pooled sessions live on
 
 
 # API docs only when DOCS=true (local dev): the gate blocks them too, but a trailing-slash redirect leaked the host
@@ -266,6 +272,58 @@ def check_migrations():
             conn.commit()
 
 
+def check_role_passwords_not_in_sql(conn):
+    """provision_roles sends SCRAM verifiers: a failing statement is logged in full, so no plaintext may be in it."""
+    class Recorder:
+        def __init__(self, c): self.c, self.sent = c, []
+        def __getattr__(self, name): return getattr(self.c, name)
+        def execute(self, q, *a, **kw):
+            self.sent.append(q.as_string(self.c) if hasattr(q, "as_string") else q)
+            return self.c.execute(q, *a, **kw)
+    rec = Recorder(conn)
+    provision_roles(rec)
+    secrets = [os.environ["BE_DB_PASSWORD"], os.environ["AI_DB_PASSWORD"]]
+    assert rec.sent and not any(pw in stmt for pw in secrets for stmt in rec.sent), "plaintext role password in SQL"
+    rows = conn.execute("SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('be_app', 'ai_app')").fetchall()
+    assert len(rows) == 2 and all(r["rolpassword"].startswith("SCRAM-SHA-256$") for r in rows), rows
+
+
+def check_concurrent_setup():
+    """Three migrate runs at once on an empty scratch database: none fails, each migration recorded once.
+    shortcut: be_app/ai_app already exist (roles are cluster-wide), so this cannot replay the original CREATE ROLE
+    race of a brand-new cluster; that was verified by hand with 3 containers on fresh Postgres."""
+    import threading
+
+    import psycopg
+    from psycopg.conninfo import make_conninfo
+
+    url = os.environ["DATABASE_URL"]
+    with psycopg.connect(url, autocommit=True) as admin:
+        admin.execute("DROP DATABASE IF EXISTS migrate_race_check WITH (FORCE)")
+        admin.execute("CREATE DATABASE migrate_race_check")
+    try:
+        scratch = make_conninfo(url, dbname="migrate_race_check")
+        start, errors = threading.Barrier(3), []
+
+        def run():
+            try:
+                with psycopg.connect(scratch, row_factory=dict_row) as c:
+                    start.wait()
+                    _setup(c)
+            except Exception as e:  # collected: an exception in a thread would otherwise vanish
+                errors.append(repr(e))
+        threads = [threading.Thread(target=run) for _ in range(3)]
+        for t in threads: t.start()
+        for t in threads: t.join(60)
+        assert not errors, errors
+        with psycopg.connect(scratch, row_factory=dict_row) as c:
+            names = [r["name"] for r in c.execute("SELECT name FROM schema_migrations")]
+        assert sorted(names) == sorted(f.name for f in MIGRATIONS.glob("*.sql")), names  # each exactly once
+    finally:
+        with psycopg.connect(url, autocommit=True) as admin:
+            admin.execute("DROP DATABASE IF EXISTS migrate_race_check WITH (FORCE)")
+
+
 def check():
     """Self-check through the HTTP API against DATABASE_URL, using the demo data (SEED_DEMO=true)."""
     from fastapi.testclient import TestClient
@@ -273,8 +331,10 @@ def check():
     assert compare({"A": 2, "B": 1}, {"A": 1, "C": 1}) == ({"A": 1, "B": 1}, {"C": 1})
     assert compare({"A": 1}, {"A": 3}) == ({}, {"A": 2})
     check_migrations()
+    check_concurrent_setup()
     pool.open(wait=True, timeout=30)
     with pool.connection() as conn:
+        check_role_passwords_not_in_sql(conn)
         provision_roles(conn)  # twice: must be safe to re-run (the migrate service runs it on every deploy)
         provision_roles(conn)
         check_roles(conn)

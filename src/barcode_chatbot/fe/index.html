@@ -19,6 +19,8 @@
   .panel h2 { font-size:1.05rem; margin:0 0 12px; }
   /* chat log and history fill their cell and scroll; contain:size keeps them from stretching the row */
   .panel .chat, .panel .scroll { flex:1 1 0; min-height:260px; overflow-y:auto; contain:size; }
+  /* scroll areas still scroll (wheel, touch, keys); only the bar is hidden */
+  * { scrollbar-width:none; } *::-webkit-scrollbar { display:none; }
   .result { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
   h1 { font-size:1.4rem; margin:.2em 0 .6em; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
@@ -562,7 +564,6 @@
       ].map(function (l) { return '<a class="btn" target="_blank" rel="nofollow noopener" href="' + esc(l[1]) + '">' + l[0] + '</a>'; }).join('') + '</div>';
     } else {
       var p = ScanCore.parseQr(e.value), keys = Object.keys(p.fields).filter(function (k) { return p.fields[k]; });
-      html += '<p class="muted" style="margin:6px 0 0">' + esc(p.label) + '</p>';
       if (keys.length) html += '<dl>' + keys.map(function (k) { return '<dt>' + esc(k) + '</dt><dd>' + esc(p.fields[k]) + '</dd>'; }).join('') + '</dl>';
       if (p.href) html += '<div class="row"><a class="btn primary" target="_blank" rel="nofollow noopener" href="' + esc(safeHref(p.href)) + '">Open</a></div>';
     }

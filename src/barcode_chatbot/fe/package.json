@@ -2,7 +2,8 @@
   "name": "barcode-chatbot-fe",
   "private": true,
   "scripts": {
-    "test": "node core.test.js && playwright test"
+    "test": "node core.test.js && playwright test",
+    "test:gate": "set GATE_URL=http://127.0.0.1:8080&& playwright test e2e/gate.spec.js"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1"

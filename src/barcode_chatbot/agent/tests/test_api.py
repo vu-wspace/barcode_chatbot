@@ -238,5 +238,20 @@ def test_request_id_from_other_thread_is_not_replayed(client, monkeypatch):
     assert done == {'thread_id': b, 'answer': 'của B', 'tools': []}  # chạy lượt mới, không trả câu trả lời của A
 
 
+def test_final_a_stripped_on_the_real_chat_path(client, monkeypatch):
+    # /chat runs astream -> the async middleware (awrap_model_call) and the SSE token strip; both must clean
+    use(monkeypatch, model(AIMessage('Dạ, đủ hàng ạ.')))
+    tid = str(uuid.uuid4())
+    ev = chat(client, message='hi', thread_id=tid)
+    assert ''.join(d['text'] for e, d in ev if e == 'token') == 'Dạ, đủ hàng.'
+    assert ev[-1][1]['answer'] == 'Dạ, đủ hàng.'
+    stored = api.app.state.agent.get_state({'configurable': {'thread_id': tid}}).values['messages'][-1]
+    assert stored.text == 'Dạ, đủ hàng.'  # history stays clean, so later turns don't copy the habit
+
+
+def test_agent_docs_off_by_default(client):
+    assert client.get('/docs').status_code == 404 and client.get('/openapi.json').status_code == 404
+
+
 def test_health(client):
     assert client.get('/health').json() == {'status': 'ok'}
