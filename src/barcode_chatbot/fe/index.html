@@ -52,6 +52,9 @@
   ul.items li .n { margin-left:auto; font-family:ui-monospace, monospace; }
   ul.items li.done .n { color:var(--accent-fg); font-weight:600; }
   ul.items li.over .n { color:var(--err-fg); font-weight:600; }
+  .verdict { margin-top:10px; padding:10px 12px; border-radius:8px; font-weight:600; white-space:pre-line; }
+  .verdict.ok { background:var(--accent); color:#fff; } .verdict.ng { background:var(--err); color:#fff; }
+  .verdict.wait { border:1px solid var(--line); color:var(--muted); font-weight:400; }
   .chat { display:flex; flex-direction:column; max-height:380px; overflow-y:auto; margin-top:8px; }
   .msg { padding:8px 12px; border-radius:10px; margin:4px 0; white-space:pre-wrap; max-width:90%; word-break:break-word; }
   .msg.me { background:var(--accent); color:#fff; align-self:flex-end; }
@@ -150,7 +153,7 @@
   };
   var NAMES = { qr_code:'QR Code', aztec:'Aztec', codabar:'Codabar', code_39:'Code 39', code_93:'Code 93', code_128:'Code 128', data_matrix:'Data Matrix', ean_8:'EAN-8', ean_13:'EAN-13', itf:'ITF', pdf417:'PDF417', upc_a:'UPC-A', upc_e:'UPC-E', asin:'ASIN', unknown:'Unknown' };
   var $ = function (id) { return document.getElementById(id); };
-  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: '', starting: false, camSession: 0, orderReq: 0, orderLoading: false };
+  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: '', starting: false, camSession: 0, orderReq: 0, orderLoading: false, verdict: null, verifySeq: 0 };
   var agree = ScanCore.createAgreement(CFG.requiredAgreement, CFG.agreeWindowMs);
 
   // --- storage (localStorage can throw in private mode) ---
@@ -340,17 +343,18 @@
     // unit of the same product is not counted.
     if (S.history[0] && S.history[0].value === value && now - S.history[0].ts < 800) return;
     if (S.orderLoading) { toast('Đang tải đơn, vui lòng quét lại sau', true); return; }
+    if (S.order && !SAFE_CODE.test(value)) { toast('Không phải mã sản phẩm, không tính vào đơn', true); return; }
+    if (S.order && S.scans.length >= 500) { toast('Đơn đã quét quá 500 lần, vui lòng quét lại từ đầu', true); return; }
     S.history.unshift({ value: value, format: format, ts: now, source: source });
     S.history.length = Math.min(S.history.length, CFG.maxHistory);
     save(CFG.historyKey, S.history);
     renderResult(S.history[0]); renderHistory();
     toast('Scanned: ' + value); beep(); if (navigator.vibrate) navigator.vibrate(80);
-    if (S.order) {
-      S.scans.push(value); renderOrder();
-      askAI('Đơn ' + S.order.order_id + '. Các mã đã quét (' + S.scans.length + ' lần quét): ' + S.scans.join(', ') +
-        '. Vừa quét: ' + value + '. Kiểm tra giúp.', S.order.order_id);
-    } else askAI('Vừa quét mã ' + value + '. Đây là sản phẩm gì?');
+    if (S.order) { S.scans.push(value); verifyOrder(); }
+    else if (SAFE_CODE.test(value)) askAI('Vừa quét mã ' + value + '. Đây là sản phẩm gì?');
   }
+  // Barcodes/SKUs only. Anything else (QR text, URLs) is shown locally but never put into an AI prompt or an order.
+  var SAFE_CODE = /^[A-Za-z0-9-]{1,64}$/;
 
   // --- BE (via the gate at /api/) ---
   function getJson(url, opts) {
@@ -390,7 +394,7 @@
     S.orderLoading = true; btn.disabled = true; btn.textContent = 'Đang tải…';
     getJson('/api/orders/' + encodeURIComponent(id), { timeoutMs: 15000 }).then(function (o) {
       if (req !== S.orderReq) return; // a newer order was requested meanwhile
-      S.order = o; S.scans = []; $('orderReset').hidden = false; renderOrder();
+      S.order = o; S.scans = []; S.verdict = null; S.verifySeq++; $('orderReset').hidden = false; renderOrder();
     }, function (e) {
       if (req !== S.orderReq) return;
       toast(e.status === 404 ? 'Không có đơn ' + id : 'Không tải được đơn (' + e.message + ')', true);
@@ -400,17 +404,56 @@
     });
   }
 
+  // The seal decision is the BE's `complete`. The AI only explains it, so a model mistake or a crafted label cannot
+  // turn a wrong box into "OK to seal".
+  function verifyOrder() {
+    var o = S.order, seq = ++S.verifySeq;
+    S.verdict = { pending: true }; renderOrder();
+    getJson('/api/orders/' + encodeURIComponent(o.order_id) + '/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ barcodes: S.scans }) }).then(function (v) {
+      if (seq !== S.verifySeq || S.order !== o) return; // a newer scan or another order replaced this check
+      S.verdict = v; renderOrder();
+      var facts = { order_id: v.order_id, complete: v.complete, missing: v.missing, extra: v.extra, unknown_count: v.unknown.length,
+        items: v.items.map(function (i) { return { sku: i.sku, name: i.name, scanned: i.scanned, quantity: i.quantity }; }) };
+      askAI('KẾT QUẢ KIỂM TRA CỦA HỆ THỐNG KHO (kết luận chính thức, đã hiển thị cho nhân viên): ' + JSON.stringify(facts) +
+        '. Giải thích ngắn gọn nhân viên cần làm gì tiếp.', o.order_id, 'Giải thích kết quả đơn ' + o.order_id + ' (' + S.scans.length + ' lần quét)');
+    }, function (e) {
+      if (seq !== S.verifySeq || S.order !== o) return;
+      S.verdict = { error: e.message }; renderOrder();
+    });
+  }
+
   function renderOrder() {
-    var o = S.order, el = $('order'), matched = 0;
-    var rows = o.items.map(function (i) {
-      var n = S.scans.filter(function (c) { return c === i.barcode || c === i.sku; }).length; matched += n;
+    var o = S.order, v = S.verdict, el = $('order');
+    var counted = v && v.items ? v.items : o.items.map(function (i) { return Object.assign({ scanned: 0 }, i); });
+    var rows = counted.map(function (i) {
+      var n = i.scanned;
       return '<li class="' + (n === i.quantity ? 'done' : n > i.quantity ? 'over' : '') + '"><span>' + esc(i.sku) + ' – ' + esc(i.name) +
         '</span><span class="n">' + n + '/' + i.quantity + (n === i.quantity ? ' ✓' : '') + '</span></li>';
     });
-    var other = S.scans.length - matched, need = o.items.reduce(function (s, i) { return s + i.quantity; }, 0);
-    if (other) rows.push('<li class="over"><span>Mã không thuộc đơn</span><span class="n">' + other + '</span></li>');
+    if (v && v.items) {
+      var inOrder = {}; v.items.forEach(function (i) { inOrder[i.sku] = 1; });
+      Object.keys(v.extra).filter(function (k) { return !inOrder[k]; }).forEach(function (k) {
+        rows.push('<li class="over"><span>' + esc(k) + ' – không thuộc đơn</span><span class="n">' + v.extra[k] + '</span></li>');
+      });
+      if (v.unknown.length) rows.push('<li class="over"><span>Mã không có trong kho</span><span class="n">' + v.unknown.length + '</span></li>');
+    }
+    var need = o.items.reduce(function (s, i) { return s + i.quantity; }, 0), banner;
+    if (!S.scans.length) banner = '<div class="verdict wait">Chưa quét sản phẩm nào</div>';
+    else if (!v || v.pending) banner = '<div class="verdict wait">Đang kiểm tra với hệ thống kho…</div>';
+    else if (v.error) banner = '<div class="verdict ng">✗ Không kiểm tra được (' + esc(v.error) + '). KHÔNG niêm phong, quét lại sản phẩm gần nhất.</div>';
+    else if (v.complete) banner = '<div class="verdict ok">✓ Đủ hàng, đúng đơn. Có thể niêm phong hộp.</div>';
+    else {
+      var why = [], name = {}; v.items.forEach(function (i) { name[i.sku] = i.name; });
+      var list = function (m) { return Object.keys(m).map(function (k) { return (name[k] || k) + ' ×' + m[k]; }).join(', '); };
+      if (Object.keys(v.missing).length) why.push('Còn thiếu: ' + list(v.missing));
+      if (Object.keys(v.extra).length) why.push('Lấy ra khỏi hộp: ' + list(v.extra));
+      if (v.unknown.length) why.push(v.unknown.length + ' mã không có trong kho: quét lại hoặc kiểm tra tem');
+      banner = '<div class="verdict ng">✗ Chưa niêm phong.\n' + esc(why.join('\n')) + '</div>';
+    }
     el.innerHTML = '<p class="muted" style="margin:8px 0 0">' + esc(o.order_id) + (o.customer ? ' · ' + esc(o.customer) : '') +
-      ' · đã quét ' + S.scans.length + ', cần ' + need + '</p><ul class="items">' + rows.join('') + '</ul>';
+      ' · đã quét ' + S.scans.length + ', cần ' + need + '</p><ul class="items">' + rows.join('') + '</ul>' +
+      '<div role="status" aria-live="polite">' + banner + '</div>';
     el.hidden = false;
   }
 
@@ -432,10 +475,13 @@
     aiJobs.forEach(function (j, i) { j.reply.classList.remove('err'); j.reply.textContent = 'Đang chờ lượt (' + (i + 1) + ' yêu cầu phía trước)…'; });
   }
   // key: an order id. A newer scan replaces a check of the same order that has not started yet (its text lists every scan).
-  function askAI(text, key) {
-    for (var i = 0; i < aiJobs.length; i++) if (key && aiJobs[i].key === key) { aiJobs[i].text = text; aiJobs[i].me.textContent = text; return; }
+  function askAI(text, key, label) {
+    for (var i = 0; i < aiJobs.length; i++) if (key && aiJobs[i].key === key) {
+      // new content = new question: a fresh request_id, else the server could replay the answer to the old one
+      aiJobs[i].text = text; aiJobs[i].id = uuid4(); aiJobs[i].me.textContent = label || text; return;
+    }
     if (aiJobs.length >= MAX_PENDING) { toast('Trợ lý đang bận, vui lòng đợi câu trả lời trước', true); return; }
-    enqueue({ text: text, key: key, id: uuid4(), me: bubble(text, 'me'), reply: bubble('', 'ai') });
+    enqueue({ text: text, key: key, id: uuid4(), me: bubble(label || text, 'me'), reply: bubble('', 'ai') });
   }
   function enqueue(job) { aiJobs.push(job); showWaiting(); nextAI(); }
   function nextAI() {
@@ -559,7 +605,7 @@
   });
   $('csvBtn').onclick = exportCsv;
   $('orderForm').onsubmit = function (e) { e.preventDefault(); var id = $('orderId').value.trim().toUpperCase(); if (id) loadOrder(id); };
-  $('orderReset').onclick = function () { S.scans = []; renderOrder(); };
+  $('orderReset').onclick = function () { S.scans = []; S.verdict = null; S.verifySeq++; renderOrder(); };
   $('chatForm').onsubmit = function (e) { e.preventDefault(); var t = $('chatInput').value.trim(); if (t) { askAI(t); $('chatInput').value = ''; } };
   $('copyAllBtn').onclick = function () { if (S.history.length) copy(S.history.map(function (e) { return e.value; }).join('\n')); };
   $('clearBtn').onclick = function () { if (S.history.length && confirm('Clear all scan history?')) { S.history = []; save(CFG.historyKey, []); renderHistory(); $('result').hidden = true; } };

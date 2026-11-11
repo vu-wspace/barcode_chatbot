@@ -47,7 +47,8 @@ services:
   gate:
     build: src/barcode_chatbot/fe
     ports:
-      - "${GATE_PORT:-8080}:80"
+      # localhost only: no login yet, and /ai/ spends LLM credits. For LAN use, put auth in front first.
+      - "127.0.0.1:${GATE_PORT:-8080}:80"
     environment:
       BE_URL: http://be:8000
       AI_URL: http://ai:8000

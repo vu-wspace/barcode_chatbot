@@ -198,5 +198,17 @@ def test_state_keeps_only_recent_turns(client, monkeypatch):
     assert [m.text for m in msgs] == ['q2', 'a2', 'q3', 'a3']
 
 
+def test_cleanup_failure_after_answer_still_reports_done(client, monkeypatch):
+    import psycopg
+    use(monkeypatch, model(AIMessage('xong')))  # gọi model lần 2 sẽ lỗi vì hết reply
+
+    async def boom(*a, **kw):
+        raise psycopg.errors.SerializationFailure('could not serialize access')
+    monkeypatch.setattr(api.app.state.saver, 'aprune', boom, raising=False)
+    body = {'message': 'hi', 'thread_id': str(uuid.uuid4()), 'request_id': str(uuid.uuid4())}
+    assert chat(client, **body)[-1] == ('done', {'thread_id': body['thread_id'], 'answer': 'xong', 'tools': []})
+    assert chat(client, **body)[-1][1]['answer'] == 'xong'  # thử lại: lấy kết quả đã có, không chạy agent lần 2
+
+
 def test_health(client):
     assert client.get('/health').json() == {'status': 'ok'}

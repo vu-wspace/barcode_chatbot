@@ -256,11 +256,16 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                     'answer': new[-1].text if new else '',
                     'tools': [tc['name'] for m in new for tc in (getattr(m, 'tool_calls', None) or [])],
                 }
-                await trim_state(agent, config, saver)
-            _results[request_id] = result
-            while len(_results) > MAX_CACHED_RESULTS:
-                _results.popitem(last=False)
-            await out.put(sse('done', result))
+                # Câu trả lời đã nằm trong checkpoint: ghi nhận ngay, để lỗi dọn dẹp bên dưới không biến lượt
+                # thành công thành lỗi (thử lại sẽ chạy agent lần 2, lặp lượt hỏi và tốn LLM).
+                _results[request_id] = result
+                while len(_results) > MAX_CACHED_RESULTS:
+                    _results.popitem(last=False)
+                await out.put(sse('done', result))
+                try:
+                    await trim_state(agent, config, saver)
+                except Exception:  # vd aprune gặp SerializationFailure khi chạy đua với vòng dọn hội thoại cũ
+                    log.exception('Dọn state hội thoại %s thất bại, sẽ dọn ở lượt sau', thread_id)
     except asyncio.CancelledError:
         raise
     except Exception as e:
