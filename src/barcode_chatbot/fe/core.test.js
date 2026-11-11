@@ -24,6 +24,27 @@ assert.ok(a.push('X', 300).accepted);
 assert.strictEqual(a.push('X', 400).count, 1);      // tally clears after acceptance
 assert.strictEqual(a.push('X', 5000).count, 1);     // window expired
 
+const r = C.createRearm(700);
+assert.ok(r.allowed('X', 0));
+r.accepted('X');
+r.see('X', 6000);                                   // still in view after the pause
+assert.ok(!r.allowed('X', 6100));                   // same item, not counted again
+assert.ok(r.allowed('Y', 6100));                    // another product: fine
+r.see(null, 6200);                                  // X left the frame
+assert.ok(!r.allowed('X', 6500));                   // ...but only for 300 ms
+r.see('Z', 6600);                                   // other reads don't restart the absence
+assert.ok(r.allowed('X', 6900));                    // gone 700 ms: a second unit counts
+r.see('X', 7000);                                   // back after 800 ms: a new unit, stays allowed for every frame
+assert.ok(r.allowed('X', 7100));
+r.see('X', 7100);
+assert.ok(r.allowed('X', 7200));
+r.accepted('X');                                    // counted; now held in view again
+r.see(null, 7300);
+r.see('X', 7600);                                   // gone only 300 ms: same unit, still blocked
+assert.ok(!r.allowed('X', 7700));
+r.reset();
+assert.ok(r.allowed('X', 7700));
+
 const w = C.parseQr('WIFI:T:WPA;S:My\\;Net;P:pa\\:ss;;');
 assert.deepStrictEqual(w.fields, { Network: 'My;Net', Password: 'pa:ss', Security: 'WPA' });
 assert.strictEqual(C.parseQr('https://x.com').label, 'Link');

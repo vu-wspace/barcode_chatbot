@@ -91,9 +91,13 @@ def provision_roles(conn):
     with conn.transaction():
         for role, password in roles.items():
             exists = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone()
+            # Send a SCRAM verifier, not the password: a failing statement is logged in full by Postgres
+            verifier = conn.pgconn.encrypt_password(password.encode(), role.encode(), b"scram-sha-256").decode()
             conn.execute(sql.SQL("{} ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD {}").format(
-                sql.SQL("ALTER" if exists else "CREATE"), sql.Identifier(role), sql.Literal(password)))
+                sql.SQL("ALTER" if exists else "CREATE"), sql.Identifier(role), sql.Literal(verifier)))
         db = sql.Identifier(conn.execute("SELECT current_database() AS d").fetchone()["d"])
+        # PUBLIC gets CONNECT + TEMP on a new database: take both away, then allow only the app roles to connect
+        conn.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(db))
         conn.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO be_app, ai_app").format(db))
         conn.execute("GRANT USAGE ON SCHEMA public TO be_app")
         conn.execute("GRANT SELECT ON products, orders, order_items TO be_app")
@@ -101,22 +105,48 @@ def provision_roles(conn):
         conn.execute("ALTER ROLE ai_app SET search_path = agent")
 
 
+def check_roles(conn):
+    """The app roles really have least privilege (run by check(), as the owner)."""
+    q = lambda s, *a: conn.execute(s, a).fetchone()["v"]  # noqa: E731
+    for role in ("be_app", "ai_app"):
+        assert q("SELECT rolsuper OR rolcreaterole OR rolcreatedb AS v FROM pg_roles WHERE rolname = %s", role) is False
+        assert q("SELECT has_database_privilege(%s, current_database(), 'TEMP') AS v", role) is False, role
+        assert q("SELECT has_schema_privilege(%s, 'public', 'CREATE') AS v", role) is False, role
+    for t in ("products", "orders", "order_items"):
+        assert q("SELECT has_table_privilege('be_app', %s, 'SELECT') AS v", t), t
+        for p in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+            assert not q("SELECT has_table_privilege('be_app', %s, %s) AS v", t, p), (t, p)
+        assert not q("SELECT has_table_privilege('ai_app', %s, 'SELECT') AS v", t), t
+    assert not q("SELECT has_table_privilege('be_app', 'schema_migrations', 'SELECT') AS v")
+    assert q("SELECT has_schema_privilege('ai_app', 'agent', 'CREATE') AS v")
+    assert not q("SELECT has_schema_privilege('be_app', 'agent', 'USAGE') AS v")
+    assert not q("SELECT has_database_privilege('public', current_database(), 'CONNECT') AS v")  # PUBLIC revoked
+
+
 def setup_db():
     """python -m app.server migrate: run once per deploy, as the DB owner, before be/ai start."""
     pool.open(wait=True, timeout=30)
     try:
         with pool.connection() as conn:
+            # Whole setup under one session lock (same key as migrate(), which re-enters it): two migrate runs at once
+            # used to race in provision_roles, both seeing no be_app and both running CREATE ROLE.
+            conn.execute("SELECT pg_advisory_lock(hashtext('barcode_chatbot.migrate'))")
+            conn.commit()  # a session lock outlives the transaction; leave no transaction open for migrate()
             ran = migrate(conn)
             print("applied migrations:", ", ".join(ran) or "none", flush=True)
             if SEED_DEMO:
                 conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
                 conn.commit()
             provision_roles(conn)
+            # no explicit unlock: the lock ends with the session when the pool closes, also after an error
     finally:
         pool.close()
 
 
-app = FastAPI(title="Barcode chatbot BE", lifespan=lifespan)
+# API docs only when DOCS=true (local dev): the gate blocks them too, but a trailing-slash redirect leaked the host
+DOCS = os.getenv("DOCS", "false").lower() == "true"
+app = FastAPI(title="Barcode chatbot BE", lifespan=lifespan,
+              docs_url="/docs" if DOCS else None, redoc_url=None, openapi_url="/openapi.json" if DOCS else None)
 
 
 @app.get("/health")
@@ -243,6 +273,11 @@ def check():
     assert compare({"A": 2, "B": 1}, {"A": 1, "C": 1}) == ({"A": 1, "B": 1}, {"C": 1})
     assert compare({"A": 1}, {"A": 3}) == ({}, {"A": 2})
     check_migrations()
+    pool.open(wait=True, timeout=30)
+    with pool.connection() as conn:
+        provision_roles(conn)  # twice: must be safe to re-run (the migrate service runs it on every deploy)
+        provision_roles(conn)
+        check_roles(conn)
     with TestClient(app) as c:
         assert c.get("/health").json() == {"status": "ok"}
         p = c.get("/products/8935000100011").json()
@@ -267,8 +302,10 @@ def check():
         assert c.post("/orders/SO-104587/verify", json={"barcodes": ["1"] * 501}).status_code == 422
         assert c.post("/orders/SO-104587/verify", json={"barcodes": [""]}).status_code == 422
         # only letters, digits and '-': no '/', '..', spaces or QR text reach SQL or another route
-        for bad in ("/products/a.b", "/products/a%20b", "/orders/SO%2F1", "/products/" + "9" * 65):
-            assert c.get(bad).status_code in (404, 422), bad
+        for bad in ("/products/a.b", "/products/a%20b", "/orders/SO.1", "/products/" + "9" * 65):
+            assert c.get(bad).status_code == 422, bad  # rejected by CODE_RE, not just "not found"
+        assert c.get("/orders/SO%2F1").status_code == 404  # uvicorn decodes %2F: /orders/SO/1 is no route
+        assert c.get("/docs").status_code == 404 and c.get("/openapi.json").status_code == 404  # DOCS off
         assert c.post("/orders/SO-104587/verify", json={"barcodes": ["http://x"]}).status_code == 422
 
         # a UPC-A item stored as 13 digits is found when scanned as 12 (the scanner's form) or as GTIN-14

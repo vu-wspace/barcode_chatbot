@@ -47,6 +47,27 @@
     };
   }
 
+  // Re-arm on absence: after a camera read is accepted, the same value is accepted again only once it has been out of
+  // view for `goneMs` of scanning time. An item left in front of the camera counts once; two identical items still
+  // count twice (take one away, show the next). Time spent paused does not count as "out of view".
+  function createRearm(goneMs) {
+    var last = null, absentSince = null;
+    return {
+      // call on every detect result while scanning (value = what was read, or null), AFTER asking allowed() for it
+      see: function (value, now) {
+        if (last === null) return;
+        if (value !== last) { if (absentSince === null) absentSince = now; return; }
+        // back in view: after a long enough absence it is a new unit, so drop the block (the next reads must still
+        // agree, which takes several frames); after a short one it is the same item still being held
+        if (absentSince !== null && now - absentSince >= goneMs) last = null;
+        absentSince = null;
+      },
+      allowed: function (value, now) { return value !== last || (absentSince !== null && now - absentSince >= goneMs); },
+      accepted: function (value) { last = value; absentSince = null; },
+      reset: function () { last = null; absentSince = null; },
+    };
+  }
+
   // Splits a QR payload into a label and fields (Wi-Fi, contact, phone, email, SMS, location, link, or plain text).
   function parseQr(v) {
     var m = function (re) { return (v.match(re) || [])[1] || ''; };
@@ -61,6 +82,6 @@
     return { label: 'Text', fields: {} };
   }
 
-  var api = { gs1CheckValid: gs1CheckValid, isReadTrustworthy: isReadTrustworthy, normalizeCode: normalizeCode, formatFromValue: formatFromValue, createAgreement: createAgreement, parseQr: parseQr };
+  var api = { gs1CheckValid: gs1CheckValid, isReadTrustworthy: isReadTrustworthy, normalizeCode: normalizeCode, formatFromValue: formatFromValue, createAgreement: createAgreement, createRearm: createRearm, parseQr: parseQr };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.ScanCore = api;
 })(this);

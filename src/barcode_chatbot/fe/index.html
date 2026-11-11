@@ -34,7 +34,8 @@
   .drop.over { border-color:var(--accent); }
   .drop img { max-width:100%; max-height:280px; }
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
-  input[type=text] { font:inherit; flex:1; min-width:0; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); }
+  /* flex-basis: on a phone the buttons wrap to the next line instead of squeezing the field to a few characters */
+  input[type=text] { font:inherit; flex:1 1 12rem; min-width:0; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); }
   .result .val { font:600 1.3rem/1.3 ui-monospace, monospace; word-break:break-all; }
   .tag { display:inline-block; font-size:.8rem; padding:2px 8px; border-radius:99px; background:var(--accent); color:#fff; }
   .muted { color:var(--muted); font-size:.85rem; }
@@ -42,7 +43,7 @@
   ul.hist { list-style:none; padding:0; margin:8px 0 0; }
   ul.hist li { display:flex; gap:8px; align-items:center; padding:8px 0; border-top:1px solid var(--line); }
   ul.hist li button.v { background:none; border:0; padding:4px 0; color:inherit; text-align:left; display:block; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:ui-monospace, monospace; cursor:pointer; }
-  ul.hist li button { padding:4px 8px; }
+  ul.hist li button:not(.v) { padding:4px 8px; min-width:40px; min-height:40px; justify-content:center; } /* finger-sized */
   #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#222; color:#fff; padding:10px 16px; border-radius:8px; opacity:0; transition:opacity .2s; pointer-events:none; max-width:calc(100% - 32px); }
   #toast.show { opacity:1; } #toast.err { background:var(--err); }
   .prod { margin-top:10px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; }
@@ -148,13 +149,14 @@
   var CFG = {
     polyfill: 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.3/dist/iife/polyfill.min.js',
     formats: ['qr_code','aztec','codabar','code_39','code_93','code_128','data_matrix','ean_8','ean_13','itf','pdf417','upc_a','upc_e'],
-    detectIntervalMs: 80, requiredAgreement: 3, agreeWindowMs: 1500, pauseMs: 5000, batchPauseMs: 1200,
+    detectIntervalMs: 80, rearmGoneMs: 700, requiredAgreement: 3, agreeWindowMs: 1500, pauseMs: 5000, batchPauseMs: 1200,
     maxHistory: 100, historyKey: 'scanner_history_v1', settingsKey: 'scanner_settings_v1',
   };
   var NAMES = { qr_code:'QR Code', aztec:'Aztec', codabar:'Codabar', code_39:'Code 39', code_93:'Code 93', code_128:'Code 128', data_matrix:'Data Matrix', ean_8:'EAN-8', ean_13:'EAN-13', itf:'ITF', pdf417:'PDF417', upc_a:'UPC-A', upc_e:'UPC-E', asin:'ASIN', unknown:'Unknown' };
   var $ = function (id) { return document.getElementById(id); };
   var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: '', starting: false, camSession: 0, orderReq: 0, orderLoading: false, verdict: null, verifySeq: 0 };
   var agree = ScanCore.createAgreement(CFG.requiredAgreement, CFG.agreeWindowMs);
+  var rearm = ScanCore.createRearm(CFG.rearmGoneMs); // an item left in view is counted once
 
   // --- storage (localStorage can throw in private mode) ---
   function load(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
@@ -215,7 +217,7 @@
     }).then(function () {
       live();
       S.starting = false; $('startBtn').disabled = false;
-      S.scanning = true; S.paused = false; agree.reset();
+      S.scanning = true; S.paused = false; agree.reset(); rearm.reset();
       feedback('Point your camera at a barcode');
       requestAnimationFrame(loop);
     }).catch(function (err) {
@@ -258,6 +260,7 @@
       if (!S.scanning || S.paused) return;
       if (codes.length) onDetect(codes[0]);
       else { drawBox(null); agree.expire(Date.now()); feedback(isDark(v) ? 'Too dark, add more light' : 'Point your camera at a barcode', isDark(v) ? 'warn' : ''); }
+      rearm.see(codes.length ? codes[0].rawValue : null, Date.now()); // after onDetect: it asks about the time before this frame
     }).catch(function () {}).then(function () { if (S.scanning && !S.paused) requestAnimationFrame(loop); });
   }
 
@@ -265,8 +268,10 @@
     var raw = code.rawValue, fmt = (code.format || '').toLowerCase(), v = $('video');
     drawBox(code.boundingBox);
     if (!ScanCore.isReadTrustworthy(raw, fmt)) { feedback('Reading, hold steady', 'warn'); return; }
+    if (!rearm.allowed(raw, Date.now())) { agree.reset(); feedback('Đã quét sản phẩm này. Đưa ra khỏi khung rồi đưa sản phẩm tiếp theo vào', 'ok'); return; }
     var r = agree.push(raw, Date.now());
     if (r.accepted) {
+      rearm.accepted(raw);
       accept(raw, fmt, 'camera');
       pause(S.batch ? CFG.batchPauseMs : CFG.pauseMs);
     } else {
@@ -333,6 +338,7 @@
   function manual() {
     var v = $('manual').value.trim().toUpperCase();
     if (!/^\d{6,14}$/.test(v) && !/^B[0-9A-Z]{9}$/.test(v)) { toast('Enter a 6 to 14 digit barcode number', true); return; }
+    if (!ScanCore.isReadTrustworthy(v, ScanCore.formatFromValue(v))) { toast('Sai số kiểm tra, kiểm tra lại mã vừa nhập', true); return; }
     accept(v, ScanCore.formatFromValue(v), 'manual'); $('manual').value = '';
   }
 
@@ -377,7 +383,8 @@
 
   function lookupProduct(code) {
     var el = $('product');
-    if (!SAFE_CODE.test(code)) { el.hidden = true; return; } // QR text, URLs: not a product code el.className = 'prod muted'; el.textContent = 'Đang tra kho…';
+    if (!SAFE_CODE.test(code)) { el.hidden = true; return; } // QR text, URLs: not a product code
+    el.className = 'prod muted'; el.textContent = 'Đang tra kho…';
     getJson('/api/products/' + encodeURIComponent(code)).then(function (p) {
       if (el !== $('product') || el.dataset.code !== code) return; // a newer result replaced this card
       el.className = 'prod';
@@ -395,7 +402,7 @@
     S.orderLoading = true; btn.disabled = true; btn.textContent = 'Đang tải…';
     getJson('/api/orders/' + encodeURIComponent(id), { timeoutMs: 15000 }).then(function (o) {
       if (req !== S.orderReq) return; // a newer order was requested meanwhile
-      S.order = o; S.scans = []; S.verdict = null; S.verifySeq++; $('orderReset').hidden = false; renderOrder();
+      S.order = o; S.scans = []; S.verdict = null; rearm.reset(); S.verifySeq++; $('orderReset').hidden = false; renderOrder();
     }, function (e) {
       if (req !== S.orderReq) return;
       toast(e.status === 404 ? 'Không có đơn ' + id : 'Không tải được đơn (' + e.message + ')', true);
@@ -409,7 +416,8 @@
   // turn a wrong box into "OK to seal".
   function verifyOrder() {
     var o = S.order, seq = ++S.verifySeq;
-    S.verdict = { pending: true }; renderOrder();
+    S.verdict = { pending: true, items: S.verdict && S.verdict.items, extra: S.verdict && S.verdict.extra,
+      unknown: S.verdict && S.verdict.unknown }; renderOrder(); // keep the last counts on screen while checking
     getJson('/api/orders/' + encodeURIComponent(o.order_id) + '/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ barcodes: S.scans }) }).then(function (v) {
       if (seq !== S.verifySeq || S.order !== o) return; // a newer scan or another order replaced this check
@@ -432,7 +440,7 @@
       return '<li class="' + (n === i.quantity ? 'done' : n > i.quantity ? 'over' : '') + '"><span>' + esc(i.sku) + ' – ' + esc(i.name) +
         '</span><span class="n">' + n + '/' + i.quantity + (n === i.quantity ? ' ✓' : '') + '</span></li>';
     });
-    if (v && v.items) {
+    if (v && v.items && v.extra) {
       var inOrder = {}; v.items.forEach(function (i) { inOrder[i.sku] = 1; });
       Object.keys(v.extra).filter(function (k) { return !inOrder[k]; }).forEach(function (k) {
         rows.push('<li class="over"><span>' + esc(k) + ' – không thuộc đơn</span><span class="n">' + v.extra[k] + '</span></li>');

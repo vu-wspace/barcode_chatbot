@@ -25,11 +25,15 @@ server {
     root /usr/share/nginx/html;
     charset utf-8;
 
+    # Revalidate every time (ETag -> 304 when unchanged). Without it the browser guessed a cache time and paired a
+    # new index.html with an old core.js after a deploy ("ScanCore.createRearm is not a function").
+    add_header Cache-Control no-cache always;
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy no-referrer always;
-    # Inline script/style: the page is one file. jsdelivr: the barcode-detector polyfill + its ZXing WASM.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' https://cdn.jsdelivr.net; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" always;
+    # Inline script/style: the page is one file. jsdelivr: the barcode-detector polyfill (cdn.) fetches its ZXing
+    # WASM from fastly.jsdelivr.net: without it every browser lacking a native BarcodeDetector cannot decode at all.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' https://cdn.jsdelivr.net https://fastly.jsdelivr.net; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" always;
 
     # Upstreams in variables + Docker DNS: resolved per request, so the gate starts even when be/ai are still down
     resolver 127.0.0.11 valid=10s ipv6=off;

@@ -198,6 +198,25 @@ def test_state_keeps_only_recent_turns(client, monkeypatch):
     assert [m.text for m in msgs] == ['q2', 'a2', 'q3', 'a3']
 
 
+def test_client_closing_right_after_done_still_trims_state(client, monkeypatch):
+    # The page aborts the request as soon as it reads `done`; the state must already be trimmed by then.
+    monkeypatch.setattr(api, 'KEEP_STATE_TURNS', 1)
+    use(monkeypatch, model(AIMessage('a0'), AIMessage('a1')))
+    tid = str(uuid.uuid4())
+    chat(client, message='q0', thread_id=tid)
+
+    async def stop_at_done():
+        q = asyncio.Queue()
+        task = asyncio.create_task(api.run_turn(api.app, api.ChatRequest(message='q1'), tid, str(uuid.uuid4()), q))
+        while not (item := await q.get()).startswith('event: done'):
+            pass
+        task.cancel()  # what chat() does when the client disconnects
+        await asyncio.gather(task, return_exceptions=True)
+    client.portal.call(stop_at_done)
+    msgs = api.app.state.agent.get_state({'configurable': {'thread_id': tid}}).values['messages']
+    assert [m.text for m in msgs] == ['q1', 'a1']
+
+
 def test_cleanup_failure_after_answer_still_reports_done(client, monkeypatch):
     import psycopg
     use(monkeypatch, model(AIMessage('xong')))  # gọi model lần 2 sẽ lỗi vì hết reply

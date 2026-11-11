@@ -16,7 +16,11 @@ test.beforeEach(async ({ page, request }) => {
     window.__codes = [];
     window.BarcodeDetector = class {
       static getSupportedFormats() { return Promise.resolve(['qr_code', 'ean_13']); }
-      detect() { const v = window.__codes.shift(); return Promise.resolve(v ? [{ rawValue: v.value, format: v.format, boundingBox: { x: 0, y: 0, width: 10, height: 10 } }] : []); }
+      detect(src) {
+        // camera frames: whatever window.__cam says is in view; uploaded images: the next queued value
+        const v = src instanceof HTMLVideoElement ? (window.__cam && { value: window.__cam, format: 'ean_13' }) : window.__codes.shift();
+        return Promise.resolve(v ? [{ rawValue: v.value, format: v.format, boundingBox: { x: 0, y: 0, width: 400, height: 100 } }] : []);
+      }
     };
   });
   await page.goto('/');
@@ -150,6 +154,79 @@ test('a retried check that gets merged with a newer scan asks again, it does not
   await page.waitForTimeout(900);
   await typeCode(page, '8935000200018');                         // merged into the waiting retry
   await expect(check).toHaveText('kết quả MỚI (2 lần quét)', { timeout: 15000 });
+});
+
+test('a failed check says do NOT seal and sends nothing to the AI', async ({ page, request }) => {
+  await page.route('**/verify', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"db down"}' }));
+  await loadOrder(page);
+  await typeCode(page, '8935000100011');
+  await expect(page.locator('#order .verdict')).toHaveClass(/ng/);
+  await expect(page.locator('#order .verdict')).toContainText('Không kiểm tra được (db down). KHÔNG niêm phong');
+  await page.waitForTimeout(500);
+  expect(await aiRequests(request)).toEqual([]);
+});
+
+test('a late answer to an older check does not overwrite the newer verdict', async ({ page }) => {
+  let n = 0;
+  await page.route('**/verify', async (r) => {
+    if (++n === 1) await new Promise((res) => setTimeout(res, 2500)); // 1st check (1 item scanned) answers last
+    await r.continue();
+  });
+  await loadOrder(page);
+  for (const code of ['8935000100011', '8935000200018', '8935000300015']) {
+    await typeCode(page, code);
+    await page.waitForTimeout(900);
+  }
+  await expect(page.locator('#order .verdict')).toHaveText('✓ Đủ hàng, đúng đơn. Có thể niêm phong hộp.');
+  await page.waitForTimeout(2500); // the stale "missing 2 items" answer lands now
+  await expect(page.locator('#order .verdict')).toHaveText('✓ Đủ hàng, đúng đơn. Có thể niêm phong hộp.');
+});
+
+test('a check still running when the scans are reset is ignored', async ({ page }) => {
+  await page.route('**/verify', async (r) => { await new Promise((res) => setTimeout(res, 1500)); await r.continue(); });
+  await loadOrder(page);
+  await typeCode(page, '8935000100011');
+  await expect(page.locator('#order .verdict')).toHaveText('Đang kiểm tra với hệ thống kho…');
+  await page.click('#orderReset');
+  await page.waitForTimeout(2000);
+  await expect(page.locator('#order .verdict')).toHaveText('Chưa quét sản phẩm nào');
+});
+
+test('product card shows a loading state, and is skipped for non-product codes', async ({ page, request }) => {
+  await page.route('**/api/products/*', async (r) => { await new Promise((res) => setTimeout(res, 1000)); await r.continue(); });
+  const productCalls = [];
+  page.on('request', (r) => { if (r.url().includes('/api/products/')) productCalls.push(r.url()); });
+  await typeCode(page, '8935000100011');
+  await expect(page.locator('#product')).toHaveText('Đang tra kho…');
+  await expect(page.locator('#product')).toContainText('Tai nghe');
+  await uploadCode(page, 'https://example.com/promo', 'qr_code'); // no order loaded
+  await expect(page.locator('#result')).toContainText('https://example.com/promo');
+  await page.waitForTimeout(500);
+  expect(productCalls).toHaveLength(1);
+  expect((await aiRequests(request)).map((r) => r.message)).toEqual(['Vừa quét mã 8935000100011. Đây là sản phẩm gì?']);
+});
+
+test('camera: an item left in view is counted once, a second unit after it left the frame', async ({ page }) => {
+  await loadOrder(page);
+  await page.click('#startBtn');
+  await page.click('#batchBtn');                       // batch mode: 1.2 s pause, the hardest case
+  await page.evaluate(() => { window.__cam = '8935000100011'; });
+  const row = page.locator('#order li', { hasText: 'HD-1001' });
+  await expect(row).toContainText('1/1 ✓');
+  await page.waitForTimeout(3000);                     // pause is over, the same headphones are still in view
+  await expect(row).toContainText('1/1 ✓');
+  await expect(page.locator('#feedback')).toContainText('Đưa ra khỏi khung');
+  await page.evaluate(() => { window.__cam = null; }); // packer takes it away...
+  await page.waitForTimeout(1000);
+  await page.evaluate(() => { window.__cam = '8935000100011'; }); // ...and shows a second unit
+  await expect(row).toContainText('2/1');
+  await page.click('#stopBtn');
+});
+
+test('manual entry rejects a wrong check digit', async ({ page }) => {
+  await typeCode(page, '8935000100012');
+  await expect(page.locator('#toast')).toHaveText('Sai số kiểm tra, kiểm tra lại mã vừa nhập');
+  await expect(page.locator('#result')).toBeHidden();
 });
 
 test('while an order loads, the button is locked and scans are not counted', async ({ page, request }) => {

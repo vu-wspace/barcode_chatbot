@@ -216,7 +216,10 @@ async def lifespan(app: FastAPI):
         tools.client.close()
 
 
-app = FastAPI(title='Packing agent', version='0.2.0', lifespan=lifespan)
+# Docs chỉ bật khi DOCS=true (chạy local): gate cũng chặn, nhưng redirect có dấu / cuối từng lộ tên host nội bộ
+DOCS = os.getenv('DOCS', 'false').lower() == 'true'
+app = FastAPI(title='Packing agent', version='0.2.0', lifespan=lifespan,
+              docs_url='/docs' if DOCS else None, redoc_url=None, openapi_url='/openapi.json' if DOCS else None)
 
 
 @app.get('/health')
@@ -265,11 +268,12 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                 _results[key] = result
                 while len(_results) > MAX_CACHED_RESULTS:
                     _results.popitem(last=False)
-                await out.put(sse('done', result))
+                # Dọn TRƯỚC khi gửi done: trang đóng kết nối ngay khi đọc được done, và ngắt kết nối thì lượt bị hủy.
                 try:
                     await trim_state(agent, config, saver)
                 except Exception:  # vd aprune gặp SerializationFailure khi chạy đua với vòng dọn hội thoại cũ
                     log.exception('Dọn state hội thoại %s thất bại, sẽ dọn ở lượt sau', thread_id)
+            await out.put(sse('done', result))
     except asyncio.CancelledError:
         raise
     except Exception as e:

@@ -27,6 +27,8 @@ lời câu hỏi về sản phẩm và đơn hàng.
 
 - **Quét mã:** camera (BarcodeDetector hoặc polyfill ZXing WASM), tải ảnh, hoặc nhập tay. Có kiểm tra số kiểm tra
   GS1 và yêu cầu nhiều khung hình đọc trùng nhau trước khi nhận mã.
+  Sản phẩm để yên trước camera chỉ được đếm một lần: phải rời khung ít nhất 0,7 s thì cùng mã mới được
+  đếm tiếp (hai sản phẩm giống nhau vẫn quét được liên tiếp). Nhập tay cũng kiểm tra số kiểm tra GS1.
 - **Tra sản phẩm:** tên, SKU, danh mục, giá, tồn kho. Mã EAN-13 có số 0 đầu, UPC-A 12 số và GTIN-14 được coi là cùng một mã.
 - **Kiểm tra đơn:** checklist từng sản phẩm (đã quét/cần), khung kết quả xanh hoặc đỏ: còn thiếu, cần lấy ra, mã không có trong kho.
 - **Trợ lý AI (tiếng Việt):** câu trả lời stream theo thời gian thực (SSE). AI dùng 4 tool gọi API của BE:
@@ -126,8 +128,8 @@ sequenceDiagram
         LG->>LLM: gọi model với kết quả tool
         LG-->>FE: event: token (nhiều lần)
         LG->>PG: lưu checkpoint
-        API-->>FE: event: done {answer, tools}
         API->>PG: cắt state còn 10 lượt, chỉ giữ checkpoint mới nhất
+        API-->>FE: event: done {answer, tools} (sau khi dọn: trang đóng kết nối ngay khi nhận done)
     end
     Note over FE,API: ": ping" mỗi 15 s. Client ngắt kết nối thì lượt bị hủy và khóa được nhả.
 ```
@@ -206,6 +208,7 @@ Dữ liệu mẫu (`be/app/seed.sql`): 6 sản phẩm, 2 đơn `SO-104587` (3 s�
 | `SEED_DEMO` | | migrate | `true` (mặc định) nạp dữ liệu mẫu; không ghi đè dòng đã sửa |
 | `GATE_PORT` | | gate | Cổng trên máy, mặc định `8080` |
 | `DATABASE_URL` | | chạy BE ngoài Docker | Dùng `127.0.0.1:5433`, không dùng `localhost` |
+| `DOCS` | | be, ai | `true` bật `/docs` và `openapi.json` khi phát triển; mặc định tắt |
 
 Container `ai` chỉ nhận các biến được liệt kê trong `docker-compose.yml`; các key khác trong `.env` không vào container.
 
@@ -251,7 +254,7 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 |---|---|
 | Mạng | Gateway chỉ mở trên `127.0.0.1`; DB chỉ mở `127.0.0.1:5433`. Chưa có đăng nhập: phải thêm đăng nhập và HTTPS trước khi mở ra LAN (camera trên điện thoại cũng cần HTTPS) |
 | Kết luận niêm phong | Do BE quyết định. Mã không phải barcode/SKU không được tính vào đơn và không bao giờ vào prompt; AI chỉ nhận JSON kết quả của BE |
-| Database | Mỗi service một role quyền tối thiểu: `be_app` chỉ SELECT 3 bảng; `ai_app` chỉ có schema `agent`; `postgres` chỉ dùng cho `migrate`. SQL luôn dùng tham số; ký tự `%`/`_` trong ô tìm kiếm được escape |
+| Database | Mỗi service một role quyền tối thiểu: `be_app` chỉ SELECT 3 bảng; `ai_app` chỉ có schema `agent`; `postgres` chỉ dùng cho `migrate`. PUBLIC bị thu hết quyền trên database (không CONNECT, không TEMP); mật khẩu role gửi dạng SCRAM, không lọt vào log. `check()` kiểm tra lại toàn bộ quyền này. SQL luôn dùng tham số; ký tự `%`/`_` trong ô tìm kiếm được escape |
 | Gateway | Rate limit `/ai/` (30/phút, burst 20); chuyển nguyên đường dẫn đã mã hóa (không giải mã `%2F`/`..`); CSP, `X-Frame-Options`, `nosniff`, `Referrer-Policy`; ẩn phiên bản nginx; chặn `/docs` và `openapi.json`; ngắt request có Host lạ |
 | Secret | `.env` và `certs/*.crt` bị git bỏ qua; image agent chỉ nhận `*.crt`, không bao giờ nhận khóa riêng; container chỉ nhận biến cần dùng |
 | Trang | Mọi nội dung hiển thị đều được escape; câu trả lời AI hiển thị bằng `textContent`; CSV xuất ra được chặn chèn công thức |
@@ -261,13 +264,14 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 
 | Bộ test | Lệnh | Cần |
 |---|---|---|
-| Agent (43 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
+| Agent (44 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
 | Agent với Postgres | `TEST_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5433/barcode_chatbot uv run pytest` | DB đang chạy; dùng schema tạm rồi xóa |
 | BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test) |
-| Trang: logic quét + E2E Playwright (8 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
+| Trang: logic quét + E2E Playwright (14 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
 
 Phạm vi E2E: kết luận do BE quyết định, QR chứa chữ không tới AI, SSE bị cắt giữa chừng, `error` → "Thử lại" với cùng
-`request_id`, stream đứt trước `done`, gộp các yêu cầu chờ, thử lại + gộp không nhận câu trả lời cũ, khóa khi đang tải đơn.
+`request_id`, stream đứt trước `done`, gộp các yêu cầu chờ, thử lại + gộp không nhận câu trả lời cũ, khóa khi đang tải đơn,
+verify lỗi → "KHÔNG niêm phong", response verify cũ về muộn không ghi đè kết luận mới, trạng thái "Đang tra kho…".
 
 > Trên Windows dùng `127.0.0.1` thay cho `localhost`: `localhost` thử IPv6 trước và mỗi kết nối chờ khoảng 8 s.
 
@@ -303,6 +307,15 @@ flowchart LR
 Lỗi thường gặp:
 - **Cổng 8080 đang bận khi tạo lại `gate`:** container cũ chưa nhả cổng kịp. Chạy lại `docker compose up -d gate`.
 - **`migrate` thoát với mã khác 0:** xem `docker compose logs migrate`. Database chưa bị thay đổi, sửa file migration lỗi rồi deploy lại.
+- **`migrate` lỗi `could not create unique index "products_gtin_key"`** (migration `002_gtin`): có 2 sản phẩm cùng quy về
+  một GTIN (vd `012345678905` và `0012345678905`). Tìm bằng
+  `SELECT lpad(barcode,14,'0') g, array_agg(sku) FROM products WHERE barcode ~ '^[0-9]{8,14}$' GROUP BY g HAVING count(*) > 1;`,
+  sửa dữ liệu rồi deploy lại.
+- **Quét ảnh/camera báo "Could not read this image" trên Chrome Windows, Firefox, Safari:** các trình duyệt
+  này không có `BarcodeDetector` sẵn nên tải polyfill ZXing từ `cdn.jsdelivr.net`, và file WASM của nó từ
+  `fastly.jsdelivr.net`. Cả hai phải được phép trong CSP (`default.conf.template`) và qua được proxy/firewall công ty.
+- **Không mở được trang từ điện thoại/máy khác:** gateway chỉ nghe `127.0.0.1` và chỉ nhận Host `localhost`/`127.0.0.1`
+  (`server_name` trong `default.conf.template`). Cần thêm đăng nhập và HTTPS rồi mới mở ra mạng.
 - **AI báo 429 liên tục:** rate limit của gateway hoặc hết quota của nhà cung cấp LLM. Xem `docker compose logs ai | grep "rate limit"`.
 
 ## Giới hạn hiện tại
