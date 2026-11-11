@@ -553,7 +553,7 @@
   }
 
   function renderResult(e) {
-    var box = $('result'), q = encodeURIComponent(e.value), html = '<span class="tag">' + esc(NAMES[e.format] || e.format) + '</span> <span class="muted">' + esc(e.source) + ' · ' + new Date(e.ts).toLocaleString() + '</span><div class="val" style="margin-top:6px">' + esc(e.value) + '</div><div class="prod" id="product" data-code="' + esc(e.value) + '"></div>';
+    var box = $('result'), q = encodeURIComponent(e.value), html = '<span class="tag">' + esc(NAMES[e.format] || e.format) + '</span> <span class="muted">' + esc(e.source) + ' · ' + new Date(e.ts).toLocaleString() + '</span><div class="row" style="margin-top:6px;flex-wrap:nowrap"><div class="val" style="flex:1;min-width:0">' + esc(e.value) + '</div><button data-copy="' + esc(e.value) + '">Copy</button></div><div class="prod" id="product" data-code="' + esc(e.value) + '"></div>';
     var retail = /^\d{8,14}$/.test(e.value);
     if (retail || e.format === 'asin') {
       html += '<div class="row">' + [
@@ -566,7 +566,6 @@
       if (keys.length) html += '<dl>' + keys.map(function (k) { return '<dt>' + esc(k) + '</dt><dd>' + esc(p.fields[k]) + '</dd>'; }).join('') + '</dl>';
       if (p.href) html += '<div class="row"><a class="btn primary" target="_blank" rel="nofollow noopener" href="' + esc(safeHref(p.href)) + '">Open</a></div>';
     }
-    html += '<div class="row"><button data-copy="' + esc(e.value) + '">Copy</button></div>';
     box.innerHTML = html; box.hidden = false;
     lookupProduct(e.value);
   }
