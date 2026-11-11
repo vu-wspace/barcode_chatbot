@@ -1,154 +1,201 @@
+import asyncio
+import json
+import threading
+import time
 import uuid
-from types import SimpleNamespace
 
 import groq
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
 
-from packing_agent import api
+from packing_agent import agent as agent_module
+from packing_agent import api, tools
 
 
-class FakeAgent:
-    """Giả lập agent có checkpointer: lưu lịch sử theo thread_id, lượt nào cũng gọi 1 tool."""
+class FakeModel(GenericFakeChatModel):
+    """Model giả trả lần lượt các message cho trước. disable_streaming: fake của langchain không stream được tool_call."""
+    def bind_tools(self, tools, **kwargs):
+        return self
 
-    def __init__(self, error: Exception | None = None):
-        self.threads: dict[str, list] = {}
-        self.error = error
 
-    def get_state(self, config):
-        return SimpleNamespace(values={'messages': list(self.threads.get(config['configurable']['thread_id'], []))})
+def model(*replies, stream=False):
+    return FakeModel(messages=iter(replies), disable_streaming=not stream)
 
-    def invoke(self, input, config):
-        if self.error:
-            raise self.error
-        history = self.threads.setdefault(config['configurable']['thread_id'], [])
-        text = input['messages'][0]['content']
-        call_id = f'call-{len(history)}'
-        history += [
-            HumanMessage(text),
-            AIMessage('', tool_calls=[{'name': 'get_product', 'args': {}, 'id': call_id}]),
-            ToolMessage('...', tool_call_id=call_id),
-            AIMessage(f'Trả lời: {text}'),
-        ]
-        return {'messages': list(history)}
+
+def call(name, **args):
+    return AIMessage('', tool_calls=[{'name': name, 'args': args, 'id': f'c-{uuid.uuid4().hex[:6]}'}])
+
+
+class Raising(FakeModel):
+    error: Exception = None
+
+    def _generate(self, *a, **kw):
+        raise self.error
 
 
 @pytest.fixture
-def client():
-    # Không dùng `with TestClient(...)` để bỏ qua lifespan (không cần model thật)
-    api.app.state.agent = FakeAgent()
-    return TestClient(api.app)
+def client(monkeypatch):
+    # BE giả cho tool
+    monkeypatch.setattr(tools, 'new_client', lambda: httpx.Client(
+        base_url='http://be', transport=httpx.MockTransport(lambda r: httpx.Response(200, json={'sku': 'HD-1001'}))))
+    api._results.clear()
+    with TestClient(api.app) as c:  # chạy lifespan: InMemorySaver vì không có DATABASE_URL
+        yield c
 
 
-def test_chat_new_thread(client):
-    r = client.post('/chat', json={'message': 'mã 8935000100011'})
-    assert r.status_code == 200
-    data = r.json()
-    uuid.UUID(data['thread_id'])
-    assert data['answer'] == 'Trả lời: mã 8935000100011'
-    assert data['tools'] == ['get_product']
+def use(monkeypatch, llm):
+    monkeypatch.setattr(agent_module, 'open_llm', llm)
+    api.app.state.agent = agent_module.build_agent(checkpointer=api.app.state.saver, fallback=False)
 
 
-def test_chat_same_thread_only_reports_tools_of_current_turn(client):
-    tid = client.post('/chat', json={'message': 'câu 1'}).json()['thread_id']
-    r = client.post('/chat', json={'message': 'câu 2', 'thread_id': tid})
-    data = r.json()
-    assert data['thread_id'] == tid
-    assert data['answer'] == 'Trả lời: câu 2'
-    assert data['tools'] == ['get_product']  # không lặp lại tool của lượt trước
-    assert len(api.app.state.agent.threads[tid]) == 8
+def chat(client, **body):
+    r = client.post('/chat', json=body)
+    assert r.status_code == 200 and r.headers['content-type'].startswith('text/event-stream'), r.text
+    events = []
+    for block in r.text.split('\n\n'):
+        lines = [l for l in block.splitlines() if not l.startswith(':')]
+        if lines:
+            events.append((lines[0].removeprefix('event: '), json.loads(lines[1].removeprefix('data: '))))
+    return events
 
 
-@pytest.mark.parametrize('body', [{'message': ''}, {'message': 'x' * 4001}, {}, {'message': 'hi', 'thread_id': 'x' * 101}])
-def test_chat_validation(client, body):
+def test_stream_order_and_final_answer(client, monkeypatch):
+    use(monkeypatch, model(call('get_product', code='8935000100011'), AIMessage('Đây là tai nghe')))
+    ev = chat(client, message='mã 8935000100011')
+    names = [e for e, _ in ev]
+    assert names[0] == 'meta' and names[-1] == 'done' and 'tool' in names
+    uuid.UUID(ev[0][1]['thread_id'])
+    assert ev[-1][1]['answer'] == 'Đây là tai nghe' and ev[-1][1]['tools'] == ['get_product']
+
+
+def test_tokens_are_streamed(client, monkeypatch):
+    use(monkeypatch, model(AIMessage('Dạ đây là tai nghe'), stream=True))
+    ev = chat(client, message='hi')
+    assert ''.join(d['text'] for e, d in ev if e == 'token') == 'Dạ đây là tai nghe'
+
+
+def test_same_thread_only_reports_tools_of_current_turn(client, monkeypatch):
+    use(monkeypatch, model(call('get_product', code='1'), AIMessage('a1'), AIMessage('a2')))
+    tid = str(uuid.uuid4())
+    chat(client, message='câu 1', thread_id=tid)
+    done = chat(client, message='câu 2', thread_id=tid)[-1][1]
+    assert done == {'thread_id': tid, 'answer': 'a2', 'tools': []}
+
+
+def test_retry_with_same_request_id_does_not_run_again(client, monkeypatch):
+    use(monkeypatch, model(AIMessage('một lần')))  # gọi model lần 2 sẽ lỗi vì hết reply
+    body = {'message': 'hi', 'thread_id': str(uuid.uuid4()), 'request_id': str(uuid.uuid4())}
+    assert chat(client, **body)[-1] == chat(client, **body)[-1]
+    assert chat(client, **body)[-1][0] == 'done'
+
+
+@pytest.mark.parametrize('body', [{'message': ''}, {'message': 'x' * 4001}, {}, {'message': 'hi', 'thread_id': '1'},
+                                  {'message': 'hi', 'request_id': 'abc'}])
+def test_validation(client, body):
+    # thread_id kiểu '1' dễ đoán -> đọc được hội thoại người khác
     assert client.post('/chat', json=body).status_code == 422
 
 
-def test_chat_rate_limit_returns_429(client):
-    resp = httpx.Response(429, request=httpx.Request('POST', 'https://api.groq.com'))
-    api.app.state.agent = FakeAgent(error=groq.RateLimitError('rate limit', response=resp, body=None))
-    r = client.post('/chat', json={'message': 'hi'})
-    assert r.status_code == 429
-    assert 'quá tải' in r.json()['detail']
-
-
-def test_chat_request_too_large_rate_limit_returns_429(client):
-    # Groq trả 413 khi vượt giới hạn token đầu vào/phút (lỗi người dùng gặp thực tế)
+def _groq_413():
     resp = httpx.Response(413, request=httpx.Request('POST', 'https://api.groq.com'))
-    body = {'error': {'message': 'Request too large ... (ITPM): Limit 7000, Requested 7142',
-                      'type': 'tokens', 'code': 'rate_limit_exceeded'}}
-    api.app.state.agent = FakeAgent(error=groq.APIStatusError('413', response=resp, body=body))
-    r = client.post('/chat', json={'message': 'hi'})
-    assert r.status_code == 429
+    return groq.APIStatusError('413', response=resp, body={'error': {'code': 'rate_limit_exceeded', 'type': 'tokens'}})
 
 
-def test_chat_gemini_rate_limit_returns_429(client):
-    from langchain_google_genai.chat_models import GoogleRateLimitError
-    api.app.state.agent = FakeAgent(error=GoogleRateLimitError("Error calling model 'gemini-3.5-flash' (RESOURCE_EXHAUSTED)"))
-    assert client.post('/chat', json={'message': 'hi'}).status_code == 429
+def _openrouter(E, cls, data_cls, code):
+    resp = httpx.Response(code, request=httpx.Request('POST', 'https://openrouter.ai'))
+    return cls(data_cls(error={'code': code, 'message': 'x'}), resp)
 
 
-def test_chat_gemini_other_error_returns_502(client):
-    from langchain_google_genai.chat_models import GoogleInvalidRequestError
-    api.app.state.agent = FakeAgent(error=GoogleInvalidRequestError('bad request'))
-    assert client.post('/chat', json={'message': 'hi'}).status_code == 502
-
-
-def test_chat_openrouter_rate_limit_returns_429(client):
-    import openrouter.errors as E
-    resp = httpx.Response(429, request=httpx.Request('POST', 'https://openrouter.ai'))
-    data = E.TooManyRequestsResponseErrorData(error={'code': 429, 'message': 'Rate limit exceeded: free-models-per-min'})
-    api.app.state.agent = FakeAgent(error=E.TooManyRequestsResponseError(data, resp))
-    assert client.post('/chat', json={'message': 'hi'}).status_code == 429
-
-
-@pytest.mark.parametrize('make_error', [
-    lambda E: E.InternalServerResponseError(E.InternalServerResponseErrorData(error={'code': 500, 'message': 'boom'}),
-                                            httpx.Response(500, request=httpx.Request('POST', 'https://openrouter.ai'))),
-    lambda E: E.NoResponseError(),  # mất kết nối, không nhận được phản hồi
+@pytest.mark.parametrize('make_error,status', [
+    (lambda: groq.RateLimitError('rl', response=httpx.Response(429, request=httpx.Request('POST', 'https://g')), body=None), 429),
+    (_groq_413, 429),
+    (lambda: groq.InternalServerError('boom', response=httpx.Response(500, request=httpx.Request('POST', 'https://g')), body=None), 502),
+    (lambda: __import__('langchain_google_genai.chat_models', fromlist=['x']).GoogleRateLimitError('RESOURCE_EXHAUSTED'), 429),
+    (lambda: __import__('langchain_google_genai.chat_models', fromlist=['x']).GoogleInvalidRequestError('bad'), 502),
+    (lambda: (E := __import__('openrouter.errors', fromlist=['x'])) and _openrouter(E, E.TooManyRequestsResponseError, E.TooManyRequestsResponseErrorData, 429), 429),
+    (lambda: (E := __import__('openrouter.errors', fromlist=['x'])) and _openrouter(E, E.InternalServerResponseError, E.InternalServerResponseErrorData, 500), 502),
+    (lambda: __import__('openrouter.errors', fromlist=['x']).NoResponseError(), 502),
+    (lambda: RuntimeError('bug'), 500),  # lỗi lạ vẫn ra event error, không làm đứt stream
 ])
-def test_chat_openrouter_other_error_returns_502(client, make_error):
-    # Lỗi OpenRouter không kế thừa ModelError: không bắt riêng thì API trả 500 kèm traceback
-    import openrouter.errors as E
-    api.app.state.agent = FakeAgent(error=make_error(E))
-    assert client.post('/chat', json={'message': 'hi'}).status_code == 502
+def test_errors_become_error_events(client, monkeypatch, make_error, status):
+    use(monkeypatch, Raising(messages=iter([]), error=make_error()))
+    ev = chat(client, message='hi')
+    assert ev[-1][0] == 'error' and ev[-1][1]['status'] == status, ev
 
 
-def test_chat_upstream_error_returns_502(client):
-    resp = httpx.Response(500, request=httpx.Request('POST', 'https://api.groq.com'))
-    api.app.state.agent = FakeAgent(error=groq.InternalServerError('boom', response=resp, body=None))
-    r = client.post('/chat', json={'message': 'hi'})
-    assert r.status_code == 502
+def test_deadline(client, monkeypatch):
+    class Slow(FakeModel):
+        def _generate(self, *a, **kw):
+            time.sleep(1)
+            return super()._generate(*a, **kw)
+    use(monkeypatch, Slow(messages=iter([AIMessage('muộn')]), disable_streaming=True))
+    monkeypatch.setattr(api, 'TURN_DEADLINE', 0.2)
+    assert chat(client, message='hi')[-1] == ('error', {'status': 504, 'detail': api.to_turn_error(TimeoutError()).detail})
 
 
-def test_thread_id_must_be_uuid(client):
-    # thread_id kiểu '1', 'abc' dễ đoán -> đọc được hội thoại của người khác
-    assert client.post('/chat', json={'message': 'hi', 'thread_id': '1'}).status_code == 422
-
-
-def test_same_thread_turns_run_one_at_a_time(client):
-    import threading
-    import time
+def test_same_thread_turns_run_one_at_a_time(client, monkeypatch):
     running, overlap = [0], []
 
-    class SlowAgent(FakeAgent):
-        def invoke(self, input, config):
+    class Slow(FakeModel):
+        def _generate(self, *a, **kw):
             running[0] += 1
             overlap.append(running[0])
             time.sleep(0.2)
             running[0] -= 1
-            return super().invoke(input, config)
-
-    api.app.state.agent = SlowAgent()
-    tid = str(uuid.uuid4())
-    ts = [threading.Thread(target=client.post, args=('/chat',), kwargs={'json': {'message': f'm{i}', 'thread_id': tid}})
+            return super()._generate(*a, **kw)
+    use(monkeypatch, Slow(messages=iter([AIMessage(f'a{i}') for i in range(3)]), disable_streaming=True))
+    tid, results = str(uuid.uuid4()), []
+    ts = [threading.Thread(target=lambda i=i: results.append(chat(client, message=f'm{i}', thread_id=tid)[-1][0]))
           for i in range(3)]
     for t in ts: t.start()
     for t in ts: t.join()
-    assert max(overlap) == 1  # không có 2 lượt nào chạy cùng lúc trên 1 thread
-    assert len(api.app.state.agent.threads[tid]) == 12  # 3 lượt x 4 message, không mất lượt nào
+    assert max(overlap) == 1 and results == ['done'] * 3
+    assert api._locks == {}  # khóa được thu hồi khi không còn ai dùng
+
+
+def test_too_many_waiters_on_one_thread(client, monkeypatch):
+    monkeypatch.setattr(api, 'MAX_WAITERS', 0)
+    use(monkeypatch, model(AIMessage('x')))
+    assert chat(client, message='hi')[-1][1]['status'] == 429
+    assert api._locks == {}  # request bị từ chối không để lại khóa
+
+
+def test_cancelled_turn_releases_lock_and_next_turn_works(client, monkeypatch):
+    # Client ngắt kết nối = task của lượt bị hủy giữa lúc chạy tool
+    started = threading.Event()
+
+    def slow_be(req):
+        started.set()
+        time.sleep(0.5)
+        return httpx.Response(200, json={'sku': 'HD-1001'})
+    tools.client = httpx.Client(base_url='http://be', transport=httpx.MockTransport(slow_be))
+    use(monkeypatch, model(call('get_order', order_id='SO-1'), AIMessage('lượt sau ok')))
+    tid = str(uuid.uuid4())
+
+    async def cancel_mid_turn():
+        q = asyncio.Queue()
+        task = asyncio.create_task(api.run_turn(api.app, api.ChatRequest(message='kiểm tra'), tid, str(uuid.uuid4()), q))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    client.portal.call(cancel_mid_turn)
+    assert api._locks == {}
+    done = chat(client, message='lượt sau', thread_id=tid)[-1]
+    assert done[0] == 'done' and done[1]['answer'] == 'lượt sau ok', done  # tool_call dở dang đã được vá
+
+
+def test_state_keeps_only_recent_turns(client, monkeypatch):
+    monkeypatch.setattr(api, 'KEEP_STATE_TURNS', 2)
+    use(monkeypatch, model(*[AIMessage(f'a{i}') for i in range(4)]))
+    tid = str(uuid.uuid4())
+    for i in range(4):
+        chat(client, message=f'q{i}', thread_id=tid)
+    msgs = api.app.state.agent.get_state({'configurable': {'thread_id': tid}}).values['messages']
+    assert [m.text for m in msgs] == ['q2', 'a2', 'q3', 'a3']
 
 
 def test_health(client):

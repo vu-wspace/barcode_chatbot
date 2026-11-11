@@ -16,6 +16,8 @@ server {
         set $ai ${AI_URL};
         rewrite ^/ai/(.*)$ /$1 break;
         proxy_pass $ai;
-        proxy_read_timeout 180s;  # LLM + tool calls + model fallback can take a while
+        proxy_read_timeout 180s;  # max gap between bytes; the agent sends a ping every 15 s
+        proxy_http_version 1.1;
+        proxy_buffering off;      # SSE: pass each event through at once
     }
 }

@@ -150,7 +150,7 @@
   };
   var NAMES = { qr_code:'QR Code', aztec:'Aztec', codabar:'Codabar', code_39:'Code 39', code_93:'Code 93', code_128:'Code 128', data_matrix:'Data Matrix', ean_8:'EAN-8', ean_13:'EAN-13', itf:'ITF', pdf417:'PDF417', upc_a:'UPC-A', upc_e:'UPC-E', asin:'ASIN', unknown:'Unknown' };
   var $ = function (id) { return document.getElementById(id); };
-  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: null, starting: false, camSession: 0, orderReq: 0, orderLoading: false };
+  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: '', starting: false, camSession: 0, orderReq: 0, orderLoading: false };
   var agree = ScanCore.createAgreement(CFG.requiredAgreement, CFG.agreeWindowMs);
 
   // --- storage (localStorage can throw in private mode) ---
@@ -348,7 +348,7 @@
     if (S.order) {
       S.scans.push(value); renderOrder();
       askAI('Đơn ' + S.order.order_id + '. Các mã đã quét (' + S.scans.length + ' lần quét): ' + S.scans.join(', ') +
-        '. Vừa quét: ' + value + '. Kiểm tra giúp.');
+        '. Vừa quét: ' + value + '. Kiểm tra giúp.', S.order.order_id);
     } else askAI('Vừa quét mã ' + value + '. Đây là sản phẩm gì?');
   }
 
@@ -356,12 +356,19 @@
   function getJson(url, opts) {
     opts = opts || {};
     var ctrl = window.AbortController ? new AbortController() : null, timer = ctrl && setTimeout(function () { ctrl.abort(); }, opts.timeoutMs || 15000);
-    return fetch(url, Object.assign({}, opts, { signal: ctrl && ctrl.signal })).catch(function (e) {
-      throw new Error(e && e.name === 'AbortError' ? 'quá thời gian chờ' : 'mất kết nối');
-    }).finally(function () { clearTimeout(timer); }).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (b) { if (!r.ok) { var e = new Error(typeof b.detail === 'string' ? b.detail : 'HTTP ' + r.status); e.status = r.status; throw e; } return b; });
-    });
+    return fetch(url, Object.assign({}, opts, { signal: ctrl && ctrl.signal })).then(function (r) {
+      return r.text().then(function (t) {
+        var b = {}; try { b = JSON.parse(t); } catch (e) {}
+        if (!r.ok) { var err = new Error(typeof b.detail === 'string' ? b.detail : 'HTTP ' + r.status); err.status = r.status; throw err; }
+        return b;
+      });
+    }).catch(function (e) {
+      if (e && e.name === 'AbortError') throw new Error('quá thời gian chờ');
+      if (e instanceof TypeError) throw new Error('mất kết nối');
+      throw e;
+    }).finally(function () { clearTimeout(timer); }); // after the body is read: a stalled body also times out
   }
+
   var VND = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' });
 
   function lookupProduct(code) {
@@ -407,29 +414,79 @@
     el.hidden = false;
   }
 
-  // --- AI agent (via the gate at /ai/); queued so turns of one thread never run concurrently ---
-  var aiQueue = Promise.resolve();
+  // --- AI agent (via the gate at /ai/), answer streamed as SSE. One turn at a time; the server also serialises per thread.
+  var MAX_PENDING = 5, aiJobs = [], aiBusy = false;
+  function uuid4() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    var b = crypto.getRandomValues(new Uint8Array(16)); b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128; // randomUUID needs HTTPS
+    var h = Array.prototype.map.call(b, function (x) { return (x + 256).toString(16).slice(1); }).join('');
+    return [h.slice(0, 8), h.slice(8, 12), h.slice(12, 16), h.slice(16, 20), h.slice(20)].join('-');
+  }
+  S.thread = uuid4(); // chosen before the first turn, so a failed first turn does not start a second conversation
+
   function bubble(text, cls) {
     var d = document.createElement('div'); d.className = 'msg ' + cls; d.textContent = text;
     $('chat').appendChild(d); $('chat').scrollTop = $('chat').scrollHeight; return d;
   }
-  function askAI(text) {
-    bubble(text, 'me'); sendAI(text, bubble('', 'ai'));
+  function showWaiting() {
+    aiJobs.forEach(function (j, i) { j.reply.classList.remove('err'); j.reply.textContent = 'Đang chờ lượt (' + (i + 1) + ' yêu cầu phía trước)…'; });
   }
-  function sendAI(text, reply) {
-    reply.classList.remove('err'); reply.textContent = 'Đang chờ lượt…';
-    aiQueue = aiQueue.then(function () {
-      reply.textContent = 'Trợ lý đang trả lời…';
-      // below the gate's 180 s proxy timeout; a stuck request must not block the queue forever
-      return getJson('/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, timeoutMs: 120000, body: JSON.stringify({ message: text, thread_id: S.thread }) })
-        .then(function (r) { S.thread = r.thread_id; reply.textContent = r.answer; })
-        .catch(function (e) {
-          reply.classList.add('err'); reply.textContent = 'Trợ lý lỗi: ' + e.message + '\n';
-          var b = document.createElement('button'); b.type = 'button'; b.textContent = 'Thử lại';
-          b.onclick = function () { sendAI(text, reply); }; reply.appendChild(b);
-        })
-        .then(function () { $('chat').scrollTop = $('chat').scrollHeight; });
-    });
+  // key: an order id. A newer scan replaces a check of the same order that has not started yet (its text lists every scan).
+  function askAI(text, key) {
+    for (var i = 0; i < aiJobs.length; i++) if (key && aiJobs[i].key === key) { aiJobs[i].text = text; aiJobs[i].me.textContent = text; return; }
+    if (aiJobs.length >= MAX_PENDING) { toast('Trợ lý đang bận, vui lòng đợi câu trả lời trước', true); return; }
+    enqueue({ text: text, key: key, id: uuid4(), me: bubble(text, 'me'), reply: bubble('', 'ai') });
+  }
+  function enqueue(job) { aiJobs.push(job); showWaiting(); nextAI(); }
+  function nextAI() {
+    if (aiBusy || !aiJobs.length) return;
+    var job = aiJobs.shift(); aiBusy = true; showWaiting();
+    streamChat(job).catch(function (e) {
+      var r = job.reply; r.classList.add('err'); r.textContent = 'Trợ lý lỗi: ' + e.message + '\n';
+      var btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Thử lại';
+      btn.onclick = function () { btn.remove(); enqueue(job); }; // same request_id: a turn that did finish is not run twice
+      r.appendChild(btn);
+    }).then(function () { aiBusy = false; $('chat').scrollTop = $('chat').scrollHeight; nextAI(); });
+  }
+
+  // POST + SSE, so EventSource (GET only) cannot be used: read the body stream and split it into events.
+  function streamChat(job) {
+    var reply = job.reply, ctrl = new AbortController(), why = '', text = '', idle;
+    var total = setTimeout(function () { why = 'quá thời gian chờ'; ctrl.abort(); }, 170000); // gate proxy gives up at 180 s
+    var kick = function () { clearTimeout(idle); idle = setTimeout(function () { why = 'mất tín hiệu từ máy chủ'; ctrl.abort(); }, 45000); }; // server pings every 15 s
+    reply.classList.remove('err'); reply.textContent = 'Trợ lý đang trả lời…'; kick();
+    return fetch('/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal,
+      body: JSON.stringify({ message: job.text, thread_id: S.thread, request_id: job.id }) }).then(function (r) {
+      if (!r.ok) return r.json().catch(function () { return {}; }).then(function (b) { throw new Error(typeof b.detail === 'string' ? b.detail : 'HTTP ' + r.status); });
+      var reader = r.body.getReader(), dec = new TextDecoder(), buf = '', result = null;
+      function handle(block) {
+        var ev = 'message', data = '';
+        block.split('\n').forEach(function (l) { if (l.indexOf('event: ') === 0) ev = l.slice(7); else if (l.indexOf('data: ') === 0) data += l.slice(6); });
+        if (!data) return; // ": ping" heartbeat
+        var d = JSON.parse(data);
+        if (ev === 'token') { text += d.text; reply.textContent = text; }
+        else if (ev === 'tool' && !text) reply.textContent = 'Đang tra cứu hệ thống kho…';
+        else if (ev === 'done') { result = d; reply.textContent = d.answer; } // authoritative: replaces streamed text
+        else if (ev === 'error') throw new Error(d.detail);
+        $('chat').scrollTop = $('chat').scrollHeight;
+      }
+      function pump() {
+        return reader.read().then(function (c) {
+          kick();
+          if (!c.done) buf += dec.decode(c.value, { stream: true });
+          var parts = buf.split('\n\n'); buf = c.done ? '' : parts.pop();
+          parts.forEach(handle);
+          if (result) { ctrl.abort(); return; }
+          if (c.done) throw new Error('kết nối bị ngắt giữa chừng');
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function (e) {
+      if (e && e.name === 'AbortError') throw new Error(why || 'đã hủy');
+      if (e instanceof TypeError) throw new Error('mất kết nối');
+      throw e;
+    }).finally(function () { clearTimeout(idle); clearTimeout(total); });
   }
 
   function renderResult(e) {

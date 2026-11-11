@@ -7,7 +7,10 @@ from langchain_core.tools import tool
 
 # Tool không truy cập DB trực tiếp: gọi API của BE (BE chạy SQL), cùng API mà trang quét mã dùng.
 BE_URL = os.getenv('BE_URL', 'http://localhost:8001')
-client = httpx.Client(base_url=BE_URL, timeout=10)
+def new_client() -> httpx.Client:
+    return httpx.Client(base_url=BE_URL, timeout=10)
+
+client = new_client()  # api.py tạo mới/đóng theo vòng đời app
 
 
 def _call(method: str, path: str, not_found: str, **kwargs) -> str:
@@ -19,7 +22,10 @@ def _call(method: str, path: str, not_found: str, **kwargs) -> str:
         return not_found
     if r.is_error:
         return f'Lỗi: hệ thống kho trả về HTTP {r.status_code}.'
-    return json.dumps(r.json(), ensure_ascii=False, default=str)
+    try:
+        return json.dumps(r.json(), ensure_ascii=False, default=str)
+    except ValueError:  # 200 nhưng body không phải JSON (proxy trả trang lỗi HTML...)
+        return 'Lỗi: hệ thống kho trả về dữ liệu không đọc được.'
 
 
 @tool

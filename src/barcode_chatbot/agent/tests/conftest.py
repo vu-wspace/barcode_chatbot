@@ -6,3 +6,5 @@ os.environ.setdefault('OPENROUTER_API_KEY', 'test-key')
 os.environ.setdefault('GOOGLE_API_KEY', 'test-key')
 # Không gửi trace của test lên LangSmith (đặt trước khi import packing_agent vì load_dotenv không ghi đè biến đã có)
 os.environ['LANGSMITH_TRACING'] = 'false'
+# Test không dùng Postgres (lịch sử trong RAM); chuỗi rỗng chặn load_dotenv lấy DATABASE_URL từ .env
+os.environ['DATABASE_URL'] = ''
