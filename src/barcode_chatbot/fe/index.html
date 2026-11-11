@@ -376,7 +376,8 @@
   var VND = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' });
 
   function lookupProduct(code) {
-    var el = $('product'); el.className = 'prod muted'; el.textContent = 'Đang tra kho…';
+    var el = $('product');
+    if (!SAFE_CODE.test(code)) { el.hidden = true; return; } // QR text, URLs: not a product code el.className = 'prod muted'; el.textContent = 'Đang tra kho…';
     getJson('/api/products/' + encodeURIComponent(code)).then(function (p) {
       if (el !== $('product') || el.dataset.code !== code) return; // a newer result replaced this card
       el.className = 'prod';
@@ -566,7 +567,8 @@
 
   function exportCsv() {
     if (!S.history.length) return;
-    var q = function (s) { return '"' + String(s).replace(/"/g, '""') + '"'; };
+    // a cell starting with = + - @ (or tab/CR) runs as a formula in Excel: prefix it with ' so it stays text
+    var q = function (s) { s = String(s); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; };
     var csv = 'value,format,source,scanned_at\n' + S.history.map(function (e) { return [q(e.value), q(NAMES[e.format] || e.format), q(e.source), q(new Date(e.ts).toISOString())].join(','); }).join('\n');
     var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'barcode-scans.csv'; a.click();
   }

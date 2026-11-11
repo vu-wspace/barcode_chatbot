@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: barcode_chatbot
     ports:
-      - "127.0.0.1:5433:5432"  # local runs / DB tools: DATABASE_URL=...@localhost:5433/barcode_chatbot (localhost only)
+      - "127.0.0.1:5433:5432"  # local runs / DB tools: DATABASE_URL=...@127.0.0.1:5433/barcode_chatbot (localhost only)
     volumes:
       - pgdata:/var/lib/postgresql  # postgres 18 keeps its data under this directory
     healthcheck:
@@ -19,27 +19,46 @@ services:
       retries: 10
     restart: unless-stopped
 
-  be:
+  # One-shot, as the DB owner: migrations, demo data, app roles. be/ai start only after it succeeded.
+  migrate:
     build: src/barcode_chatbot/be
+    command: ["python", "-m", "app.server", "migrate"]
     environment:
-      # a password with @ : / ? # % must be URL-encoded here
+      # a password with @ : / ? # % must be URL-encoded in these URLs
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/barcode_chatbot
       SEED_DEMO: ${SEED_DEMO:-true}  # demo products + orders SO-104587, SO-104588 (never overwrites edited rows)
+      BE_DB_PASSWORD: ${BE_DB_PASSWORD:?set BE_DB_PASSWORD in .env}
+      AI_DB_PASSWORD: ${AI_DB_PASSWORD:?set AI_DB_PASSWORD in .env}
     depends_on:
       db:
         condition: service_healthy
+    restart: "no"
+
+  be:
+    build: src/barcode_chatbot/be
+    environment:
+      DATABASE_URL: postgresql://be_app:${BE_DB_PASSWORD}@db:5432/barcode_chatbot  # SELECT on shop tables only
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   ai:
     build: src/barcode_chatbot/agent
-    env_file: .env  # OPENROUTER_API_KEY, GOOGLE_API_KEY, GROQ_API_KEY, LANGSMITH_*
+    # Only what the agent needs (no env_file: the LLM-facing process should not hold unrelated secrets)
     environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in .env}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:?set GOOGLE_API_KEY in .env}
+      GROQ_API_KEY: ${GROQ_API_KEY:-unused}  # llm.py builds a Groq client; the agent does not call it
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}  # true sends whole conversations (customer names) to LangSmith
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-barcode-chatbot}
       BE_URL: http://be:8000
-      # chat history (LangGraph checkpoints) lives in the same Postgres; overrides the localhost URL in .env
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/barcode_chatbot
+      # chat history (LangGraph checkpoints) in schema "agent", owned by ai_app; no access to shop tables
+      DATABASE_URL: postgresql://ai_app:${AI_DB_PASSWORD}@db:5432/barcode_chatbot
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       be:
         condition: service_started
     restart: unless-stopped

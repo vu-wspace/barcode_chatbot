@@ -1,11 +1,13 @@
 """Backend: products and orders in PostgreSQL, used by the scanner page and by the AI agent's tools.
 
-    uv run uvicorn app.server:app --host 0.0.0.0 --port 8000
-    uv run python -m app.server check   # self-check against DATABASE_URL (needs the demo data: SEED_DEMO=true)
+    uv run python -m app.server migrate   # as the DB owner: migrations, demo data (SEED_DEMO=true), app roles
+    uv run uvicorn app.server:app --host 0.0.0.0 --port 8000   # as be_app: read-only on products/orders
+    uv run python -m app.server check     # self-check, as the DB owner (it writes and removes test rows)
 
-Needs DATABASE_URL, e.g. postgresql://postgres:<password>@localhost:5432/barcode_chatbot
+Needs DATABASE_URL, e.g. postgresql://be_app:<password>@127.0.0.1:5433/barcode_chatbot
 """
 import os
+import re
 import sys
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -14,6 +16,8 @@ from typing import Annotated
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi import Path as PathParam
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
@@ -22,7 +26,16 @@ load_dotenv()
 HERE = Path(__file__).parent
 SEED_DEMO = os.getenv("SEED_DEMO", "false").lower() == "true"
 
-Code = Annotated[str, Field(min_length=1, max_length=64)]
+# Barcodes, SKUs and order ids: letters, digits, dash. Same rule as SAFE_CODE in the scanner page. Anything else
+# (a QR URL, text with '/' or '..') is rejected before it reaches SQL or a route.
+CODE_RE = r"^[A-Za-z0-9-]{1,64}$"
+Code = Annotated[str, Field(pattern=CODE_RE)]
+CodeParam = Annotated[str, PathParam(pattern=CODE_RE)]
+
+
+def gtin(code: str) -> str:
+    """Same key as the products.gtin column (migrations/002_gtin.sql): numeric 8-14 digits -> zero-padded GTIN-14."""
+    return code.zfill(14) if re.fullmatch(r"[0-9]{8,14}", code) else code
 
 PRODUCT_COLS = "sku, barcode, name, category, price, stock"
 
@@ -60,15 +73,47 @@ async def lifespan(_):
         raise RuntimeError("DATABASE_URL is not set (add it to .env)")
     pool.open(wait=True, timeout=30)
     try:
-        with pool.connection() as conn:
-            ran = migrate(conn)
-            if ran:
-                print("applied migrations:", ", ".join(ran), flush=True)
-            if SEED_DEMO:
-                conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
         yield
     finally:
-        pool.close()  # also when a migration fails, so the process exits cleanly
+        pool.close()
+
+
+def provision_roles(conn):
+    """App roles with least privilege (passwords from BE_DB_PASSWORD / AI_DB_PASSWORD; skipped when unset).
+
+    be_app: SELECT on products/orders/order_items only. ai_app: owns schema "agent" (LangGraph checkpoint tables),
+    no access to shop data. Idempotent: runs on every migrate, so a changed password in .env is applied.
+    """
+    roles = {"be_app": os.getenv("BE_DB_PASSWORD"), "ai_app": os.getenv("AI_DB_PASSWORD")}
+    if not all(roles.values()):
+        print("BE_DB_PASSWORD / AI_DB_PASSWORD not set: app roles not created", flush=True)
+        return
+    with conn.transaction():
+        for role, password in roles.items():
+            exists = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone()
+            conn.execute(sql.SQL("{} ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD {}").format(
+                sql.SQL("ALTER" if exists else "CREATE"), sql.Identifier(role), sql.Literal(password)))
+        db = sql.Identifier(conn.execute("SELECT current_database() AS d").fetchone()["d"])
+        conn.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO be_app, ai_app").format(db))
+        conn.execute("GRANT USAGE ON SCHEMA public TO be_app")
+        conn.execute("GRANT SELECT ON products, orders, order_items TO be_app")
+        conn.execute("CREATE SCHEMA IF NOT EXISTS agent AUTHORIZATION ai_app")
+        conn.execute("ALTER ROLE ai_app SET search_path = agent")
+
+
+def setup_db():
+    """python -m app.server migrate: run once per deploy, as the DB owner, before be/ai start."""
+    pool.open(wait=True, timeout=30)
+    try:
+        with pool.connection() as conn:
+            ran = migrate(conn)
+            print("applied migrations:", ", ".join(ran) or "none", flush=True)
+            if SEED_DEMO:
+                conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
+                conn.commit()
+            provision_roles(conn)
+    finally:
+        pool.close()
 
 
 app = FastAPI(title="Barcode chatbot BE", lifespan=lifespan)
@@ -92,11 +137,12 @@ def search_products(q: str = Query("", max_length=100), limit: int = Query(20, g
 
 
 @app.get("/products/{code}")
-def get_product(code: str):
-    """One product by barcode or SKU. A code that is one product's barcode and another's SKU means the barcode."""
+def get_product(code: CodeParam):
+    """One product by barcode (any GTIN length) or SKU. A code that is one product's barcode and another's SKU
+    means the barcode."""
     with pool.connection() as conn:
-        row = conn.execute(f"SELECT {PRODUCT_COLS} FROM products WHERE barcode = %(c)s OR sku = %(c)s"
-                           " ORDER BY barcode = %(c)s DESC LIMIT 1", {"c": code}).fetchone()
+        row = conn.execute(f"SELECT {PRODUCT_COLS} FROM products WHERE gtin = %(g)s OR sku = %(c)s"
+                           " ORDER BY gtin = %(g)s DESC LIMIT 1", {"g": gtin(code), "c": code}).fetchone()
     if row is None:
         raise HTTPException(404, "unknown product")
     return row
@@ -114,7 +160,7 @@ def load_order(conn, order_id):
 
 
 @app.get("/orders/{order_id}")
-def get_order(order_id: str):
+def get_order(order_id: CodeParam):
     with pool.connection() as conn:
         return load_order(conn, order_id)
 
@@ -131,13 +177,16 @@ def compare(expected: dict[str, int], scanned: dict[str, int]):
 
 
 @app.post("/orders/{order_id}/verify")
-def verify_order(order_id: str, body: Scans):
+def verify_order(order_id: CodeParam, body: Scans):
     """Compare the scanned barcodes (or SKUs) against the order. Read-only: nothing is stored."""
+    codes = set(body.barcodes)
     with pool.connection() as conn:
         order = load_order(conn, order_id)
-        rows = conn.execute("SELECT sku, barcode FROM products WHERE barcode = ANY(%(c)s) OR sku = ANY(%(c)s)",
-                            {"c": list(set(body.barcodes))}).fetchall()
-    to_sku = {r["sku"]: r["sku"] for r in rows} | {r["barcode"]: r["sku"] for r in rows}  # barcode wins, as in get_product
+        rows = conn.execute("SELECT sku, gtin FROM products WHERE gtin = ANY(%(g)s) OR sku = ANY(%(c)s)",
+                            {"g": [gtin(c) for c in codes], "c": list(codes)}).fetchall()
+    by_gtin, by_sku = {r["gtin"]: r["sku"] for r in rows}, {r["sku"]: r["sku"] for r in rows}
+    to_sku = {c: by_gtin.get(gtin(c)) or by_sku.get(c) for c in codes}  # barcode wins, as in get_product
+    to_sku = {c: s for c, s in to_sku.items() if s}
     scanned = Counter(to_sku[c] for c in body.barcodes if c in to_sku)
     expected = {i["sku"]: i["quantity"] for i in order["items"]}
     missing, extra = compare(expected, scanned)
@@ -212,6 +261,27 @@ def check():
         assert v["missing"] == {"CH-2001": 1, "CB-3001": 1} and v["extra"] == {"HD-1001": 1, "MS-4001": 1}, v
         assert v["unknown"] == ["123"], v
         assert c.post("/orders/NOPE/verify", json={"barcodes": []}).status_code == 404
+        all3 = ["8935000100011", "8935000200018", "8935000300015"]
+        v = c.post("/orders/SO-104587/verify", json={"barcodes": all3 + ["123"]}).json()
+        assert not v["complete"] and v["missing"] == {} and v["extra"] == {} and v["unknown"] == ["123"], v
+        assert c.post("/orders/SO-104587/verify", json={"barcodes": ["1"] * 501}).status_code == 422
+        assert c.post("/orders/SO-104587/verify", json={"barcodes": [""]}).status_code == 422
+        # only letters, digits and '-': no '/', '..', spaces or QR text reach SQL or another route
+        for bad in ("/products/a.b", "/products/a%20b", "/orders/SO%2F1", "/products/" + "9" * 65):
+            assert c.get(bad).status_code in (404, 422), bad
+        assert c.post("/orders/SO-104587/verify", json={"barcodes": ["http://x"]}).status_code == 422
+
+        # a UPC-A item stored as 13 digits is found when scanned as 12 (the scanner's form) or as GTIN-14
+        with pool.connection() as conn:
+            conn.execute("INSERT INTO products (sku, barcode, name) VALUES ('CHECK-UPC', '0012345678905', 'upc')")
+        try:
+            for code in ("012345678905", "0012345678905", "00012345678905"):
+                assert c.get(f"/products/{code}").json()["sku"] == "CHECK-UPC", code
+            v = c.post("/orders/SO-104587/verify", json={"barcodes": ["012345678905"]}).json()
+            assert v["extra"] == {"CHECK-UPC": 1} and v["unknown"] == [], v
+        finally:
+            with pool.connection() as conn:
+                conn.execute("DELETE FROM products WHERE sku = 'CHECK-UPC'")
 
         # a code that is one product's barcode and another product's SKU resolves to the barcode
         with pool.connection() as conn:
@@ -227,7 +297,9 @@ def check():
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["check"]:
+    if sys.argv[1:] == ["migrate"]:
+        setup_db()
+    elif sys.argv[1:] == ["check"]:
         check()
     else:
         print(__doc__)

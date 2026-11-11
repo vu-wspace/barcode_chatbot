@@ -35,7 +35,7 @@ log = logging.getLogger('uvicorn.error')
 
 TURN_DEADLINE = 120       # giây cho cả lượt (mọi lần gọi model, retry, fallback, tool); FE chờ tối đa 170s
 LOCK_WAIT = 20            # chờ lượt trước của cùng hội thoại xong
-MAX_WAITERS = 3           # số request được xếp hàng trên 1 hội thoại
+MAX_WAITERS = 3           # số request trên 1 hội thoại, tính cả lượt đang chạy (1 chạy + 2 chờ)
 MAX_ACTIVE = 8            # số lượt chạy đồng thời toàn server
 SLOT_WAIT = 10
 HEARTBEAT = 15
@@ -96,7 +96,9 @@ def to_turn_error(e: Exception) -> TurnError:
 # nên nhiều worker/replica dùng chung DB cũng không chạy 2 lượt của 1 hội thoại cùng lúc.
 _locks: dict[str, list] = {}   # thread_id -> [Lock, số request đang giữ/chờ]; xóa khi về 0
 _slots = asyncio.Semaphore(MAX_ACTIVE)
-_results: OrderedDict[str, dict] = OrderedDict()  # request_id -> event done. shortcut: trong RAM của 1 process
+# (thread_id, request_id) -> event done: request_id của hội thoại khác không lấy được câu trả lời của hội thoại này.
+# shortcut: trong RAM của 1 process (mất khi restart, không chia sẻ giữa worker)
+_results: OrderedDict[tuple[str, str], dict] = OrderedDict()
 
 
 @asynccontextmanager
@@ -187,6 +189,7 @@ async def retention_loop(saver, pool):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db_url = os.getenv('DATABASE_URL')
+    tools.client.close()  # client tạo lúc import; dùng client mới gắn với vòng đời app
     tools.client = tools.new_client()
     try:
         if not db_url:
@@ -230,11 +233,12 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
     agent, saver = app.state.agent, app.state.saver
     config = {'configurable': {'thread_id': thread_id}}
     try:
-        if request_id in _results:  # thử lại 1 lượt đã xong
-            return await out.put(sse('done', _results[request_id]))
+        key = (thread_id, request_id)
+        if key in _results:  # thử lại 1 lượt đã xong
+            return await out.put(sse('done', _results[key]))
         async with turn_slot(thread_id, app.state.pool):
-            if request_id in _results:  # lượt gốc vừa xong trong lúc request này chờ khóa
-                return await out.put(sse('done', _results[request_id]))
+            if key in _results:  # lượt gốc vừa xong trong lúc request này chờ khóa
+                return await out.put(sse('done', _results[key]))
             async with asyncio.timeout(TURN_DEADLINE):
                 await repair_dangling_tool_calls(agent, config)
                 n_before = len((await agent.aget_state(config)).values.get('messages', []))
@@ -258,7 +262,7 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                 }
                 # Câu trả lời đã nằm trong checkpoint: ghi nhận ngay, để lỗi dọn dẹp bên dưới không biến lượt
                 # thành công thành lỗi (thử lại sẽ chạy agent lần 2, lặp lượt hỏi và tốn LLM).
-                _results[request_id] = result
+                _results[key] = result
                 while len(_results) > MAX_CACHED_RESULTS:
                     _results.popitem(last=False)
                 await out.put(sse('done', result))

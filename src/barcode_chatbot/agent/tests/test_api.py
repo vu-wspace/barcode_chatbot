@@ -210,5 +210,14 @@ def test_cleanup_failure_after_answer_still_reports_done(client, monkeypatch):
     assert chat(client, **body)[-1][1]['answer'] == 'xong'  # thử lại: lấy kết quả đã có, không chạy agent lần 2
 
 
+def test_request_id_from_other_thread_is_not_replayed(client, monkeypatch):
+    use(monkeypatch, model(AIMessage('của A'), AIMessage('của B')))
+    rid = str(uuid.uuid4())
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    assert chat(client, message='hi', thread_id=a, request_id=rid)[-1][1]['answer'] == 'của A'
+    done = chat(client, message='hi', thread_id=b, request_id=rid)[-1][1]
+    assert done == {'thread_id': b, 'answer': 'của B', 'tools': []}  # chạy lượt mới, không trả câu trả lời của A
+
+
 def test_health(client):
     assert client.get('/health').json() == {'status': 'ok'}

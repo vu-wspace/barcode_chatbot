@@ -2,3 +2,6 @@
 .pytest_cache
 **/__pycache__
 tests
+# chỉ chứng chỉ CA vào image, không bao giờ khóa riêng
+certs/*
+!certs/*.crt

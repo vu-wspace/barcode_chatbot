@@ -16,6 +16,7 @@ groq_llm = ChatGroq(
 google_llm = ChatGoogleGenerativeAI(
     model='gemini-3.1-flash-lite',
     temperature=0,
+    max_output_tokens=1024,  # trần chi phí mỗi lần gọi; câu trả lời thực tế dưới 300 token
     timeout=60,
     max_retries=3,
 )

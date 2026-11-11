@@ -22,5 +22,5 @@ RUN --mount=from=ghcr.io/astral-sh/uv:0.12.23,source=/uv,target=/bin/uv \
 
 USER nobody
 EXPOSE 8000
-# 1 worker: lịch sử hội thoại (InMemorySaver) nằm trong RAM của process
+# 1 worker: cache request_id (_results) và khóa asyncio nằm trong RAM của process (lịch sử hội thoại ở Postgres)
 CMD ["uvicorn", "packing_agent.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

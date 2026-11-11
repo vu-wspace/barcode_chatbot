@@ -1,23 +1,62 @@
 # Gate: one origin for the page, the BE (/api/) and the AI agent (/ai/).
+# This file is included in nginx's http block, so the map/limit_req_zone lines below are valid here.
+
+# Pass the path to be/ai exactly as the browser sent it (still %-encoded). A rewrite works on the decoded,
+# normalised $uri, so "x%2F..%2F..%2Forders%2FSO-1" used to reach a different BE route.
+map $request_uri $api_uri { ~^/api(/.*)$ $1; default /; }
+map $request_uri $ai_uri  { ~^/ai(/.*)$  $1; default /; }
+
+# /ai/ spends LLM credits: 30 turns/min per client, bursts of 20 (a fast scan run is coalesced by the page anyway).
+# shortcut: behind Docker's port proxy every client can share one address, so this acts as a global limit;
+# key on a user id once there is login.
+limit_req_zone $binary_remote_addr zone=ai:10m rate=30r/m;
+
+server_tokens off;
+
+# Only the names this gate is published under: a request with another Host (DNS rebinding) is dropped.
+server {
+    listen 80 default_server;
+    return 444;
+}
+
 server {
     listen 80;
+    server_name localhost 127.0.0.1;
     root /usr/share/nginx/html;
+    charset utf-8;
+
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+    # Inline script/style: the page is one file. jsdelivr: the barcode-detector polyfill + its ZXing WASM.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' https://cdn.jsdelivr.net; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" always;
 
     # Upstreams in variables + Docker DNS: resolved per request, so the gate starts even when be/ai are still down
     resolver 127.0.0.11 valid=10s ipv6=off;
 
+    # API docs stay reachable inside the Docker network only
+    location ~ ^/(api|ai)/(docs|redoc|openapi\.json)$ {
+        return 404;
+    }
+
     location /api/ {
         set $be ${BE_URL};
-        rewrite ^/api/(.*)$ /$1 break;
-        proxy_pass $be;
+        proxy_pass $be$api_uri;
     }
 
     location /ai/ {
+        limit_req zone=ai burst=20 nodelay;
+        limit_req_status 429;
+        error_page 429 = @ai_busy;
         set $ai ${AI_URL};
-        rewrite ^/ai/(.*)$ /$1 break;
-        proxy_pass $ai;
+        proxy_pass $ai$ai_uri;
         proxy_read_timeout 180s;  # max gap between bytes; the agent sends a ping every 15 s
         proxy_http_version 1.1;
         proxy_buffering off;      # SSE: pass each event through at once
+    }
+
+    location @ai_busy {
+        default_type application/json;
+        return 429 '{"detail": "Trợ lý đang nhận quá nhiều yêu cầu, anh/chị vui lòng chờ 1 phút rồi thử lại."}';
     }
 }
