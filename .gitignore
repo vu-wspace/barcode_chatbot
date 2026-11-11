@@ -24,3 +24,8 @@ graphify-out/
 
 # Trang HTML đã tải khi cào dữ liệu (data_schema/scrape_phone.py)
 data_schema/.cache/
+
+# Frontend E2E (src/barcode_chatbot/fe)
+node_modules/
+test-results/
+playwright-report/

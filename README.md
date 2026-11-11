@@ -67,6 +67,17 @@ cd src/barcode_chatbot/agent && uv run pytest                 # agent (no LLM, B
 node src/barcode_chatbot/fe/core.test.js                      # scanner logic
 ```
 
+Page E2E (Playwright, Chromium): the real `index.html` against `fe/e2e/server.js`, a fake BE plus a scripted SSE agent,
+so no Docker, DB or LLM is needed. Covers the BE-decided seal verdict, QR text kept out of the AI, SSE events split
+across reads, error → "Thử lại" with the same `request_id`, a stream cut before `done`, merging of waiting checks,
+and the order-loading lock.
+
+```
+cd src/barcode_chatbot/fe
+npm ci && npx playwright install chromium   # once
+npm test                                    # core.test.js + E2E
+```
+
 Postgres-only agent paths (advisory lock, checkpoint pruning, 7-day retention) run when a DB is given; they use a
 scratch schema and drop it:
 
