@@ -18,8 +18,11 @@ test.beforeEach(async ({ page, request }) => {
       static getSupportedFormats() { return Promise.resolve(['qr_code', 'ean_13']); }
       detect(src) {
         // camera frames: whatever window.__cam says is in view; uploaded images: the next queued value
-        const v = src instanceof HTMLVideoElement ? (window.__cam && { value: window.__cam, format: 'ean_13' }) : window.__codes.shift();
-        return Promise.resolve(v ? [{ rawValue: v.value, format: v.format, boundingBox: { x: 0, y: 0, width: 400, height: 100 } }] : []);
+        // window.__cam may list several codes in view; window.__hang makes the next call never settle
+        if (window.__hang) { window.__hang = false; return new Promise(() => {}); }
+        const v = src instanceof HTMLVideoElement ? [].concat(window.__cam || []).map((value) => ({ value, format: 'ean_13' }))
+          : [].concat(window.__codes.shift() || []);
+        return Promise.resolve(v.map((c) => ({ rawValue: c.value, format: c.format, boundingBox: { x: 0, y: 0, width: 400, height: 100 } })));
       }
     };
   });
@@ -240,4 +243,101 @@ test('while an order loads, the button is locked and scans are not counted', asy
   await expect(page.locator('#order .verdict')).toHaveText('Chưa quét sản phẩm nào'); // the scan was not added
   await expect(page.locator('#orderLoad')).toBeEnabled();
   expect(await aiRequests(request)).toEqual([]);
+});
+
+test('scanning an order label opens its checklist; the next label is read only after the box is complete', async ({ page }) => {
+  await uploadCode(page, 'so-1', 'code_128');
+  await expect(page.locator('#order .verdict')).toHaveText('Chưa quét sản phẩm nào');
+  await expect(page.locator('#orderId')).toHaveValue('SO-1');
+  await expect(page.locator('#order li')).toHaveCount(3);
+
+  await typeCode(page, '8935000100011');
+  await expect(page.locator('#order li', { hasText: 'HD-1001' })).toContainText('1/1 ✓');
+  await uploadCode(page, 'SO-1', 'code_128'); // the label still in view: must not reset the count
+  await expect(page.locator('#order p')).toContainText('đã quét 1');
+
+  await uploadCode(page, 'SO-2', 'code_128'); // mid-order: counted as a scan, does not switch orders
+  await expect(page.locator('#order li', { hasText: 'Mã không có trong kho' })).toContainText('1');
+  await page.click('#orderReset');
+
+  for (const c of ['8935000100011', '8935000200018', '8935000300015']) { await page.waitForTimeout(900); await typeCode(page, c); }
+  await expect(page.locator('#order .verdict')).toHaveText('✓ Đủ hàng, đúng đơn. Có thể niêm phong hộp.');
+  await uploadCode(page, 'SO-2', 'code_128');
+  await expect(page.locator('#orderId')).toHaveValue('SO-2');
+  await expect(page.locator('#order li')).toHaveCount(1);
+  await expect(page.locator('#order li')).toContainText('MS-4001');
+});
+
+test('a code that is not an order is looked up as a product', async ({ page }) => {
+  await uploadCode(page, 'HD-1001', 'code_128');
+  await expect(page.locator('#product')).toContainText('Tai nghe');
+  await expect(page.locator('#order')).toBeHidden();
+});
+
+test('the printed checklist shows only the order', async ({ page }) => {
+  await loadOrder(page);
+  await page.evaluate(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
+  await page.click('#orderPrint');
+  expect(await page.evaluate(() => window.__printed)).toBe(1);
+  await page.emulateMedia({ media: 'print' });
+  await expect(page.locator('#pOrder')).toBeVisible();
+  await expect(page.locator('#order li')).toHaveCount(3);
+  for (const id of ['#pScan', '#pChat', '#pHist', '#orderForm']) await expect(page.locator(id)).toBeHidden();
+});
+
+test('the checklist is shown in the chat and updated live on every scan', async ({ page }) => {
+  await loadOrder(page);
+  const card = page.locator('#chat .msg.checklist');
+  await expect(card).toHaveCount(1);
+  await expect(card).toContainText('SO-1');
+  await expect(card).toContainText('Chưa quét sản phẩm nào');
+
+  await typeCode(page, '8935000100011');
+  await expect(card.locator('li', { hasText: 'HD-1001' })).toContainText('1/1 ✓');
+  await expect(card).toContainText('Còn thiếu');
+  await expect(card).toHaveCount(1);                                     // updated in place, not a new message per scan
+  await expect(card.locator('[aria-live]')).toHaveCount(0);
+
+  await page.click('#orderReset');
+  await expect(card).toContainText('Chưa quét sản phẩm nào');
+  await loadOrder(page, 'SO-2');
+  await expect(page.locator('#chat .msg.checklist')).toHaveCount(2);        // the new order gets its own card
+  await expect(page.locator('#chat .msg.checklist').first()).toContainText('SO-1');
+});
+
+test('camera: two items in view, listed in either order, are each counted once', async ({ page }) => {
+  await loadOrder(page);
+  await page.click('#startBtn');
+  const hd = page.locator('#order li', { hasText: 'HD-1001' }), ch = page.locator('#order li', { hasText: 'CH-2001' });
+  await page.evaluate(() => { window.__cam = ['8935000100011', '8935000200018']; });
+  await expect(hd).toContainText('1/1 ✓');
+  await expect(ch).toContainText('1/1 ✓');      // the 2nd item is read while the 1st is still in frame
+  await page.evaluate(() => { let n = 0; window.__flip = setInterval(() => {
+    window.__cam = n++ % 2 ? ['8935000100011', '8935000200018'] : ['8935000200018', '8935000100011']; }, 150); });
+  await page.waitForTimeout(4000);              // both stay in view the whole time
+  await expect(hd).toContainText('1/1 ✓');
+  await expect(ch).toContainText('1/1 ✓');
+  await page.evaluate(() => clearInterval(window.__flip));
+  await page.click('#stopBtn');
+});
+
+test('camera: an order label left in view opens the order once', async ({ page }) => {
+  await page.click('#startBtn');
+  await page.evaluate(() => { window.__cam = 'SO-1'; });
+  await expect(page.locator('#order .verdict')).toHaveText('Chưa quét sản phẩm nào');
+  await page.waitForTimeout(3000);
+  await expect(page.locator('#feedback')).toContainText('Đưa ra khỏi khung');
+  await expect(page.locator('#toast')).not.toContainText('đang mở');
+  await page.click('#stopBtn');
+});
+
+test('camera: a stuck decoder call does not stop scanning, an ended camera is reported', async ({ page }) => {
+  await loadOrder(page);
+  await page.evaluate(() => { window.__hang = true; });
+  await page.click('#startBtn');
+  await page.evaluate(() => { window.__cam = '8935000100011'; });
+  await expect(page.locator('#order li', { hasText: 'HD-1001' })).toContainText('1/1 ✓', { timeout: 10000 });
+  await page.evaluate(() => document.getElementById('video').srcObject.getVideoTracks()[0].dispatchEvent(new Event('ended')));
+  await expect(page.locator('#toast')).toContainText('Camera bị ngắt');
+  await expect(page.locator('#startBtn')).toBeVisible();
 });

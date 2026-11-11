@@ -51,20 +51,25 @@
   // view for `goneMs` of scanning time. An item left in front of the camera counts once; two identical items still
   // count twice (take one away, show the next). Time spent paused does not count as "out of view".
   function createRearm(goneMs) {
-    var last = null, absentSince = null;
+    // every counted value still blocked -> when it was last seen leaving the frame (null = in view). One entry per
+    // value: with only the last one remembered, two items held in frame were counted again and again in turn.
+    var blocked = Object.create(null); // no prototype: a code like "toString" must not look blocked
     return {
-      // call on every detect result while scanning (value = what was read, or null), AFTER asking allowed() for it
-      see: function (value, now) {
-        if (last === null) return;
-        if (value !== last) { if (absentSince === null) absentSince = now; return; }
-        // back in view: after a long enough absence it is a new unit, so drop the block (the next reads must still
-        // agree, which takes several frames); after a short one it is the same item still being held
-        if (absentSince !== null && now - absentSince >= goneMs) last = null;
-        absentSince = null;
+      // call on every detect result while scanning (values = every code read in the frame, or null), AFTER asking
+      // allowed(). A value is in view while ANY code in the frame is it (the decoder lists them in any order).
+      see: function (values, now) {
+        var here = [].concat(values);
+        Object.keys(blocked).forEach(function (v) {
+          var gone = blocked[v] !== null && now - blocked[v] >= goneMs;
+          // back after a long enough absence = a new unit (its reads must still agree); a short one = the same item
+          if (here.indexOf(v) !== -1) { if (gone) delete blocked[v]; else blocked[v] = null; }
+          else if (gone) delete blocked[v];
+          else if (blocked[v] === null) blocked[v] = now;
+        });
       },
-      allowed: function (value, now) { return value !== last || (absentSince !== null && now - absentSince >= goneMs); },
-      accepted: function (value) { last = value; absentSince = null; },
-      reset: function () { last = null; absentSince = null; },
+      allowed: function (value, now) { return !(value in blocked) || (blocked[value] !== null && now - blocked[value] >= goneMs); },
+      accepted: function (value) { blocked[value] = null; },
+      reset: function () { blocked = Object.create(null); },
     };
   }
 

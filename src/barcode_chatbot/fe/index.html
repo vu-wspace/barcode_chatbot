@@ -73,6 +73,16 @@
   .msg.ai { background:var(--bg); border:1px solid var(--line); align-self:flex-start; }
   .msg.err { border-color:var(--err-fg); color:var(--err-fg); }
   .msg button { margin-top:6px; padding:4px 10px; }
+  .msg.checklist { background:var(--bg); border:1px solid var(--line); align-self:flex-start; width:90%; white-space:normal; }
+  /* printed checklist: only the order panel, black on white, a tick box per line to mark by hand */
+  @media print {
+    :root { --fg:#000; --muted:#333; --bg:#fff; --card:#fff; --line:#999; --accent-fg:#000; --err-fg:#000; }
+    body { background:#fff; color:#000; }
+    main > h1, .grid > section:not(#pOrder), #orderForm, #toast { display:none !important; }
+    .grid { display:block; } #pOrder { border:0; padding:0; }
+    ul.items li::before { content:"±0"; } ul.items li.done::before { content:"±1"; }
+    .verdict { border:1px solid #000; background:none !important; color:#000 !important; }
+  }
 </style>
 </head>
 <body>
@@ -129,9 +139,10 @@
   <section class="card panel" id="pOrder" aria-labelledby="pOrderH">
     <h2 id="pOrderH">📦 Đơn</h2>
     <form class="row" id="orderForm">
-      <input type="text" id="orderId" placeholder="Mã đơn, vd SO-104587" aria-label="Mã đơn hàng">
+      <input type="text" id="orderId" placeholder="Nhập hoặc quét mã đơn, vd SO-104587" aria-label="Mã đơn hàng">
       <button class="primary" id="orderLoad">Tải đơn</button>
       <button type="button" id="orderReset" hidden>Quét lại từ đầu</button>
+      <button type="button" id="orderPrint" hidden>In checklist</button>
     </form>
     <div id="order" hidden></div>
   </section>
@@ -159,7 +170,7 @@
   var CFG = {
     polyfill: 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.3/dist/iife/polyfill.min.js',
     formats: ['qr_code','aztec','codabar','code_39','code_93','code_128','data_matrix','ean_8','ean_13','itf','pdf417','upc_a','upc_e'],
-    detectIntervalMs: 80, rearmGoneMs: 700, requiredAgreement: 3, agreeWindowMs: 1500, pauseMs: 5000, batchPauseMs: 1200,
+    detectIntervalMs: 80, detectTimeoutMs: 3000, rearmGoneMs: 700, requiredAgreement: 3, agreeWindowMs: 1500, pauseMs: 5000, batchPauseMs: 1200,
     maxHistory: 100, historyKey: 'scanner_history_v1', settingsKey: 'scanner_settings_v1',
   };
   var NAMES = { qr_code:'QR Code', aztec:'Aztec', codabar:'Codabar', code_39:'Code 39', code_93:'Code 93', code_128:'Code 128', data_matrix:'Data Matrix', ean_8:'EAN-8', ean_13:'EAN-13', itf:'ITF', pdf417:'PDF417', upc_a:'UPC-A', upc_e:'UPC-E', asin:'ASIN', unknown:'Unknown' };
@@ -220,6 +231,8 @@
     }).then(function (stream) {
       if (sid !== S.camSession) { stream.getTracks().forEach(function (t) { t.stop(); }); throw CANCELLED; } // stopped while asking for permission
       S.stream = stream; S.track = stream.getVideoTracks()[0] || null;
+    // camera unplugged, taken by another app or revoked: without this the page shows a frozen frame and scans nothing
+    if (S.track) S.track.addEventListener('ended', function () { if (sid === S.camSession) { stopCamera(); toast('Camera bị ngắt, bấm bật lại camera', true); } });
       var v = $('video'); v.srcObject = stream; v.hidden = false;
       $('startBtn').hidden = true; $('controls').hidden = false; $('guide').hidden = false;
       setupTrackControls();
@@ -266,11 +279,16 @@
     var v = $('video'), now = Date.now();
     if (v.readyState < 2 || !v.videoWidth || now - S.lastDetect < CFG.detectIntervalMs) { requestAnimationFrame(loop); return; }
     S.lastDetect = now;
-    S.detector.detect(v).then(function (codes) {
+    // a detect() that never settles would stop the loop for good (seen with the WASM decoder): give up on it
+    var hung = new Promise(function (ok, fail) { setTimeout(function () { fail(new Error('detect-timeout')); }, CFG.detectTimeoutMs); });
+    Promise.race([S.detector.detect(v), hung]).then(function (codes) {
       if (!S.scanning || S.paused) return;
-      if (codes.length) onDetect(codes[0]);
+      // several codes in view (two items, or a box with EAN + QR): read the first one not counted yet, so the next
+      // item can go in while the last one is still in frame
+      var now = Date.now(), pick = codes.filter(function (c) { return rearm.allowed(c.rawValue, now); })[0] || codes[0];
+      if (pick) onDetect(pick);
       else { drawBox(null); agree.expire(Date.now()); feedback(isDark(v) ? 'Too dark, add more light' : 'Point your camera at a barcode', isDark(v) ? 'warn' : ''); }
-      rearm.see(codes.length ? codes[0].rawValue : null, Date.now()); // after onDetect: it asks about the time before this frame
+      rearm.see(codes.map(function (c) { return c.rawValue; }), Date.now()); // after onDetect: it asks about the time before this frame
     }).catch(function () {}).then(function () { if (S.scanning && !S.paused) requestAnimationFrame(loop); });
   }
 
@@ -283,7 +301,7 @@
     if (r.accepted) {
       rearm.accepted(raw);
       accept(raw, fmt, 'camera');
-      pause(S.batch ? CFG.batchPauseMs : CFG.pauseMs);
+      pause(S.batch || S.order ? CFG.batchPauseMs : CFG.pauseMs); // with an order open the re-arm rule stops double counts
     } else {
       var small = code.boundingBox && code.boundingBox.width / v.videoWidth < 0.25;
       feedback(small ? 'Barcode detected, move a little closer' : 'Verifying, hold steady (' + r.count + '/' + CFG.requiredAgreement + ')', 'warn');
@@ -292,7 +310,7 @@
 
   function pause(ms) {
     S.paused = true; drawBox(null); $('stage').classList.add('locked');
-    feedback(S.batch ? 'Scanned, keep going' : 'Scanned. Paused for ' + ms / 1000 + ' seconds', 'ok');
+    feedback(ms === CFG.batchPauseMs ? 'Scanned, keep going' : 'Scanned. Paused for ' + ms / 1000 + ' seconds', 'ok');
     clearTimeout(S.pauseTimer);
     S.pauseTimer = setTimeout(function () {
       S.paused = false; agree.reset(); $('stage').classList.remove('locked');
@@ -357,8 +375,23 @@
     var n = ScanCore.normalizeCode(raw, fmt), value = n.value, format = n.format || ScanCore.formatFromValue(value), now = Date.now();
     // Drops only double-fires of one read. Must stay below the batch pause (1200 ms) + agreement time, else a second
     // unit of the same product is not counted.
-    if (S.history[0] && S.history[0].value === value && now - S.history[0].ts < 800) return;
+    if (S.last && S.last.value === value && now - S.last.ts < 800) return;
+    S.last = { value: value, ts: now };
     if (S.orderLoading) { toast('Đang tải đơn, vui lòng quét lại sau', true); return; }
+    var id = value.toUpperCase();
+    if (S.order && id === S.order.order_id) { toast('Đơn ' + id + ' đang mở, quét sản phẩm'); return; }
+    // An order label opens its checklist. Tried only between orders (none open, or the open one is complete), so a
+    // scan mid-order is always counted. A 404 means it was a product code after all.
+    // shortcut: a numeric order id that is also a valid GTIN is read as a product; use the order box for those.
+    var between = !S.order || (S.verdict && S.verdict.complete === true);
+    if (between && SAFE_CODE.test(value) && !(/^\d{8,14}$/.test(value) && ScanCore.gs1CheckValid(value))) {
+      // the label stays in view after its order opens: keep it blocked, else it is read again every pause
+      loadOrder(id, function () { record(value, format, source, now); }, function () { if (source === 'camera') rearm.accepted(raw); });
+      return;
+    }
+    record(value, format, source, now);
+  }
+  function record(value, format, source, now) {
     if (S.order && !SAFE_CODE.test(value)) { toast('Không phải mã sản phẩm, không tính vào đơn', true); return; }
     if (S.order && S.scans.length >= 500) { toast('Đơn đã quét quá 500 lần, vui lòng quét lại từ đầu', true); return; }
     S.history.unshift({ value: value, format: format, ts: now, source: source });
@@ -407,18 +440,23 @@
   }
 
   // --- order checklist ---
-  function loadOrder(id) {
-    var req = ++S.orderReq, btn = $('orderLoad');
+  // onMissing: called instead of the "no such order" toast (a scanned code that turned out not to be an order).
+  function loadOrder(id, onMissing, onLoaded) {
+    var req = ++S.orderReq, btn = $('orderLoad'), missing = false;
     S.orderLoading = true; btn.disabled = true; btn.textContent = 'Đang tải…';
     getJson('/api/orders/' + encodeURIComponent(id), { timeoutMs: 15000 }).then(function (o) {
       if (req !== S.orderReq) return; // a newer order was requested meanwhile
-      S.order = o; S.scans = []; S.verdict = null; rearm.reset(); S.verifySeq++; $('orderReset').hidden = false; renderOrder();
+      S.order = o; S.scans = []; S.verdict = null; rearm.reset(); if (onLoaded) onLoaded(); S.verifySeq++; renderOrder();
+      $('orderReset').hidden = $('orderPrint').hidden = false; $('orderId').value = o.order_id;
+      toast('Đã mở đơn ' + o.order_id + ', quét sản phẩm'); beep();
     }, function (e) {
       if (req !== S.orderReq) return;
-      toast(e.status === 404 ? 'Không có đơn ' + id : 'Không tải được đơn (' + e.message + ')', true);
+      if (e.status === 404 && onMissing) missing = true;
+      else toast(e.status === 404 ? 'Không có đơn ' + id : 'Không tải được đơn (' + e.message + ')', true);
     }).then(function () {
       if (req !== S.orderReq) return;
       S.orderLoading = false; btn.disabled = false; btn.textContent = 'Tải đơn';
+      if (missing) onMissing();
     });
   }
 
@@ -474,6 +512,12 @@
       ' · đã quét ' + S.scans.length + ', cần ' + need + '</p><ul class="items">' + rows.join('') + '</ul>' +
       '<div role="status" aria-live="polite">' + banner + '</div>';
     el.hidden = false;
+    // Same checklist live in the chat: one card per order, updated on every scan and moved down to the newest messages.
+    // An earlier order's card stays as a snapshot of where it was left.
+    var card = S.chatCard;
+    if (!card || card.dataset.order !== o.order_id) { card = S.chatCard = bubble('', 'checklist'); card.dataset.order = o.order_id; }
+    card.innerHTML = '<strong>📦 Checklist đơn</strong>' + el.innerHTML.replace(' role="status" aria-live="polite"', ''); // #chat is already a live region
+    $('chat').appendChild(card); $('chat').scrollTop = $('chat').scrollHeight;
   }
 
   // --- AI agent (via the gate at /ai/), answer streamed as SSE. One turn at a time; the server also serialises per thread.
@@ -623,6 +667,7 @@
   });
   $('csvBtn').onclick = exportCsv;
   $('orderForm').onsubmit = function (e) { e.preventDefault(); var id = $('orderId').value.trim().toUpperCase(); if (id) loadOrder(id); };
+  $('orderPrint').onclick = function () { window.print(); };
   $('orderReset').onclick = function () { S.scans = []; S.verdict = null; S.verifySeq++; renderOrder(); };
   $('chatForm').onsubmit = function (e) { e.preventDefault(); var t = $('chatInput').value.trim(); if (t) { askAI(t); $('chatInput').value = ''; } };
   $('copyAllBtn').onclick = function () { if (S.history.length) copy(S.history.map(function (e) { return e.value; }).join('\n')); };

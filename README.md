@@ -28,9 +28,13 @@ lời câu hỏi về sản phẩm và đơn hàng.
 - **Quét mã:** camera (BarcodeDetector hoặc polyfill ZXing WASM), tải ảnh, hoặc nhập tay. Có kiểm tra số kiểm tra
   GS1 và yêu cầu nhiều khung hình đọc trùng nhau trước khi nhận mã.
   Sản phẩm để yên trước camera chỉ được đếm một lần: phải rời khung ít nhất 0,7 s thì cùng mã mới được
-  đếm tiếp (hai sản phẩm giống nhau vẫn quét được liên tiếp). Nhập tay cũng kiểm tra số kiểm tra GS1.
+  đếm tiếp (hai sản phẩm giống nhau vẫn quét được liên tiếp). Nhiều mã cùng trong khung: mỗi món chỉ đếm một lần,
+  món mới được đọc dù món cũ còn trong khung. Camera bị ngắt thì báo lỗi; lệnh giải mã treo quá 3 s thì bỏ qua và quét tiếp.
+  Nhập tay cũng kiểm tra số kiểm tra GS1.
 - **Tra sản phẩm:** tên, SKU, danh mục, giá, tồn kho. Mã EAN-13 có số 0 đầu, UPC-A 12 số và GTIN-14 được coi là cùng một mã.
-- **Kiểm tra đơn:** checklist từng sản phẩm (đã quét/cần), khung kết quả xanh hoặc đỏ: còn thiếu, cần lấy ra, mã không có trong kho.
+- **Kiểm tra đơn:** quét tem mã đơn (hoặc nhập tay) để mở checklist từng sản phẩm (đã quét/cần), cập nhật ngay mỗi lần quét;
+  khung kết quả xanh hoặc đỏ: còn thiếu, cần lấy ra, mã không có trong kho. Tem đơn chỉ được đọc khi chưa mở đơn hoặc đơn
+  đang mở đã đủ hàng, nên giữa chừng mọi mã quét đều được đếm. Checklist cũng hiện trong khung chat và cập nhật theo mỗi lần quét. Nút "In checklist" in riêng danh sách, có ô ☐ để đánh dấu tay.
 - **Trợ lý AI (tiếng Việt):** câu trả lời stream theo thời gian thực (SSE). AI dùng 4 tool gọi API của BE:
   `get_product`, `search_products`, `get_order`, `verify_order`. Lịch sử hội thoại lưu trong Postgres.
 - **Ổn định:** hủy lượt khi client ngắt kết nối, giới hạn thời gian mỗi lượt, mỗi hội thoại chạy từng lượt một
@@ -82,7 +86,7 @@ sequenceDiagram
     participant BE as be
     participant AI as ai (agent)
 
-    NV->>FE: Nhập mã đơn SO-104587
+    NV->>FE: Quét tem hoặc nhập mã đơn SO-104587
     FE->>BE: GET /api/orders/SO-104587
     BE-->>FE: danh sách sản phẩm cần đóng gói
     loop Mỗi sản phẩm bỏ vào hộp
@@ -186,7 +190,7 @@ cp .env.example .env     # điền mật khẩu và API key (xem Cấu hình)
 docker compose up -d --build
 ```
 
-Mở http://localhost:8080, nhập đơn `SO-104587`, rồi quét hoặc gõ lần lượt `8935000100011`, `8935000200018`,
+Mở http://localhost:8080, quét tem hoặc nhập đơn `SO-104587`, rồi quét hoặc gõ lần lượt `8935000100011`, `8935000200018`,
 `8935000300015`. Khung kết quả chuyển xanh khi đủ hàng.
 
 Dữ liệu mẫu (`be/app/seed.sql`): 7 sản phẩm, 3 đơn `SO-104587` (3 sản phẩm), `SO-104588` (chuột ×2, Salonpas ×3)
@@ -269,11 +273,11 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 | Agent với Postgres | `TEST_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5433/barcode_chatbot uv run pytest` | DB đang chạy; dùng schema tạm rồi xóa |
 | BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test) |
 | Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |
-| Trang: logic quét + E2E Playwright (14 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
+| Trang: logic quét + E2E Playwright (21 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
 
 Phạm vi E2E: kết luận do BE quyết định, QR chứa chữ không tới AI, SSE bị cắt giữa chừng, `error` → "Thử lại" với cùng
 `request_id`, stream đứt trước `done`, gộp các yêu cầu chờ, thử lại + gộp không nhận câu trả lời cũ, khóa khi đang tải đơn,
-verify lỗi → "KHÔNG niêm phong", response verify cũ về muộn không ghi đè kết luận mới, trạng thái "Đang tra kho…".
+verify lỗi → "KHÔNG niêm phong", response verify cũ về muộn không ghi đè kết luận mới, trạng thái "Đang tra kho…", quét tem đơn (mở đơn, giữa chừng không đổi đơn, đủ hàng thì mở đơn kế), in checklist, checklist trong chat cập nhật theo mỗi lần quét.
 
 > Trên Windows dùng `127.0.0.1` thay cho `localhost`: `localhost` thử IPv6 trước và mỗi kết nối chờ khoảng 8 s.
 

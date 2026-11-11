@@ -43,6 +43,13 @@ r.see(null, 7300);
 r.see('X', 7600);                                   // gone only 300 ms: same unit, still blocked
 assert.ok(!r.allowed('X', 7700));
 r.reset();
+r.accepted('Q');                                    // two codes in view, the decoder lists them in either order
+r.see(['P', 'Q'], 0); r.see(['Q', 'P'], 500); r.see(['P', 'Q'], 1000);
+assert.ok(!r.allowed('Q', 1100));                   // Q never left: not counted again
+r.accepted('P');                                    // both counted, both still held in frame
+r.see(['Q', 'P'], 1200); r.see(['P', 'Q'], 2500);
+assert.ok(!r.allowed('P', 2600) && !r.allowed('Q', 2600));
+r.reset();
 assert.ok(r.allowed('X', 7700));
 
 const w = C.parseQr('WIFI:T:WPA;S:My\\;Net;P:pa\\:ss;;');

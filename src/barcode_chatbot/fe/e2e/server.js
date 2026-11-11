@@ -14,7 +14,10 @@ const PRODUCTS = {
   'CB-3001': { sku: 'CB-3001', barcode: '8935000300015', name: 'Cáp USB-C', category: 'Phụ kiện', price: 90000, stock: 120 },
   'MS-4001': { sku: 'MS-4001', barcode: '8935000400012', name: 'Chuột', category: 'Máy tính', price: 320000, stock: 40 },
 };
-const ORDERS = { 'SO-1': { order_id: 'SO-1', customer: 'Khách A', items: { 'CB-3001': 1, 'CH-2001': 1, 'HD-1001': 1 } } };
+const ORDERS = {
+  'SO-1': { order_id: 'SO-1', customer: 'Khách A', items: { 'CB-3001': 1, 'CH-2001': 1, 'HD-1001': 1 } },
+  'SO-2': { order_id: 'SO-2', customer: 'Khách B', items: { 'MS-4001': 1 } },
+};
 
 let aiScript = [];   // [{ chunks: [string], delayMs, hang }]
 let aiRequests = []; // bodies of POST /ai/chat
