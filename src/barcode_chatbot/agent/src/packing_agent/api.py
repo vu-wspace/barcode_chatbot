@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from packing_agent import tools
 from packing_agent.agent import build_agent
+from packing_agent.prompts import strip_final_a
 
 log = logging.getLogger('uvicorn.error')
 
@@ -255,8 +256,8 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                         if tc.get('name') and tc.get('id') not in sent_tools:
                             sent_tools.add(tc.get('id'))
                             await out.put(sse('tool', {'name': tc['name']}))
-                    if msg.text:
-                        await out.put(sse('token', {'text': msg.text}))
+                    if msg.text:  # the stored answer is cleaned by the middleware; clean the live pieces too
+                        await out.put(sse('token', {'text': strip_final_a(msg.text)}))
                 new = (await agent.aget_state(config)).values['messages'][n_before:]
                 result = {
                     'thread_id': thread_id,

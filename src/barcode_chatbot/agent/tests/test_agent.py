@@ -26,7 +26,8 @@ def ask(agent) -> str:
 
 
 def test_falls_back_to_gemini_when_primary_fails(models):
-    assert ask(agent_module.build_agent()) == 'Dạ, em trả lời bằng model dự phòng ạ.'
+    # the fallback's answer also goes through the middleware: its sentence-final 'ạ' is dropped
+    assert ask(agent_module.build_agent()) == 'Dạ, em trả lời bằng model dự phòng.'
 
 
 def test_no_fallback_raises_primary_error(models):

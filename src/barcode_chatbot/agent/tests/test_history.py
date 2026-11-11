@@ -41,3 +41,25 @@ def test_short_history_unchanged():
     msgs = turn(0, tool_output='ngắn')
     assert trim_history(msgs) == msgs
     assert trim_history([]) == []
+
+
+def test_strip_final_a():
+    from packing_agent.prompts import strip_final_a
+    assert strip_final_a('Dạ, còn 25 cái ạ.') == 'Dạ, còn 25 cái.'
+    assert strip_final_a('Hết hàng rồi anh/chị ạ!\nAnh/chị đợi nha ạ') == 'Hết hàng rồi anh/chị!\nAnh/chị đợi nha'
+    assert strip_final_a('Dạ, cảm ơn anh/chị, ạ.') == 'Dạ, cảm ơn anh/chị.'
+    # words that merely contain ạ, and a mid-sentence ạ, stay
+    keep = 'Dạ, hạn sử dụng còn lại 3 tháng, mạng ổn. Anh/chị ạ, em kiểm tra rồi.'
+    assert strip_final_a(keep) == keep
+
+
+def test_middleware_cleans_stored_answer():
+    from langchain_core.messages import AIMessage
+    from packing_agent.history import clean_response
+    from langchain.agents.middleware.types import ModelResponse
+    r = clean_response(ModelResponse(result=[AIMessage('Dạ, đủ hàng ạ.')]))
+    assert r.result[0].content == 'Dạ, đủ hàng.'
+    blocks = clean_response(AIMessage([{'type': 'text', 'text': 'Còn 2 cái ạ.'}]))
+    assert blocks.content[0]['text'] == 'Còn 2 cái.'
+    calls = clean_response(AIMessage('', tool_calls=[{'name': 'get_product', 'args': {}, 'id': 'c'}]))
+    assert calls.tool_calls[0]['name'] == 'get_product'
