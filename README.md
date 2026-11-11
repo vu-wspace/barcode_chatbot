@@ -1,6 +1,6 @@
 # Barcode Chatbot: kiểm tra đóng gói bằng mã vạch và trợ lý AI
 
-Nhân viên ở bàn đóng gói tải đơn hàng, quét mã vạch từng sản phẩm bỏ vào hộp. Hệ thống tra sản phẩm trong kho, đối
+Nhân viên ở bàn đóng gói quét tem mã đơn để mở checklist, rồi quét mã vạch từng sản phẩm bỏ vào hộp. Hệ thống tra sản phẩm trong kho, đối
 chiếu với đơn và báo **có được niêm phong hộp hay chưa**. Trợ lý AI giải thích kết quả (thiếu gì, cần lấy gì ra) và trả
 lời câu hỏi về sản phẩm và đơn hàng.
 
@@ -25,18 +25,26 @@ lời câu hỏi về sản phẩm và đơn hàng.
 
 ## Tính năng
 
-- **Quét mã:** camera (BarcodeDetector hoặc polyfill ZXing WASM), tải ảnh, hoặc nhập tay. Có kiểm tra số kiểm tra
-  GS1 và yêu cầu nhiều khung hình đọc trùng nhau trước khi nhận mã.
-  Sản phẩm để yên trước camera chỉ được đếm một lần: phải rời khung ít nhất 0,7 s thì cùng mã mới được
-  đếm tiếp (hai sản phẩm giống nhau vẫn quét được liên tiếp). Nhiều mã cùng trong khung: mỗi món chỉ đếm một lần,
-  món mới được đọc dù món cũ còn trong khung. Camera bị ngắt thì báo lỗi; lệnh giải mã treo quá 3 s thì bỏ qua và quét tiếp.
-  Khung hình đọc thường không ra thì thử lại: ảnh thu nhỏ một nửa (đỡ nhiễu khi tối), tăng tương phản (ảnh mờ), xoay ±45°
-  (mã cầm chéo). Món để yên mà tạm không đọc được (ảnh 32×24 không đổi) không bị coi là đã lấy ra, nên không đếm lại.
-  Nhập tay cũng kiểm tra số kiểm tra GS1.
+- **Quét mã:** camera (BarcodeDetector có sẵn trên Android/macOS; Chrome Windows, Firefox, Safari dùng polyfill ZXing WASM),
+  tải ảnh, hoặc nhập tay. Mã EAN/UPC phải đúng số kiểm tra GS1 và được đọc trùng 3 lần trong 1,5 s mới được nhận.
+- **Camera ổn định** (đo bằng video giả lập 15 điều kiện, xem [Kiểm thử](#kiểm-thử)):
+  - Khung hình đọc thường không ra thì thử lại theo 4 cách: thu nhỏ một nửa (đỡ nhiễu khi tối), tăng tương phản (ảnh mờ),
+    xoay ±45° (mã cầm chéo). Cách vừa thành công được thử trước ở khung sau. Tự lấy nét liên tục nếu camera hỗ trợ.
+  - Món để yên chỉ đếm **một lần**. Cùng mã chỉ được đếm lại khi món đã rời khung ít nhất 0,7 s, nên hai món giống
+    nhau vẫn quét liên tiếp được. Món vẫn nằm yên mà tạm không đọc được (ảnh thu nhỏ 32×24 của khung không đổi)
+    không bị coi là đã lấy ra.
+  - Nhiều mã cùng trong khung (2 món, hoặc hộp có cả EAN và QR): mỗi món đếm một lần, món mới được đọc dù món cũ còn trong khung.
+  - Camera bị ngắt (rút USB, app khác chiếm) thì báo lỗi; lệnh giải mã treo quá 3 s thì bỏ qua và quét tiếp.
+  - Khi đang mở đơn, sau mỗi lần quét chỉ dừng 1,2 s (ngoài đơn: 5 s, hoặc 1,2 s ở chế độ quét liên tục).
 - **Tra sản phẩm:** tên, SKU, danh mục, giá, tồn kho. Mã EAN-13 có số 0 đầu, UPC-A 12 số và GTIN-14 được coi là cùng một mã.
-- **Kiểm tra đơn:** quét tem mã đơn (hoặc nhập tay) để mở checklist từng sản phẩm (đã quét/cần), cập nhật ngay mỗi lần quét;
-  khung kết quả xanh hoặc đỏ: còn thiếu, cần lấy ra, mã không có trong kho. Tem đơn chỉ được đọc khi chưa mở đơn hoặc đơn
-  đang mở đã đủ hàng, nên giữa chừng mọi mã quét đều được đếm. Checklist cũng hiện trong khung chat và cập nhật theo mỗi lần quét. Nút "In checklist" in riêng danh sách, có ô ☐ để đánh dấu tay.
+- **Mở đơn:** quét tem mã đơn (Code 128, QR…) hoặc nhập tay. Tem đơn chỉ được đọc khi chưa mở đơn nào hoặc đơn đang
+  mở đã đủ hàng, nên giữa chừng mọi mã quét đều được đếm vào đơn (quét nhầm tem đơn khác sẽ hiện là mã không có trong
+  kho, không đổi đơn). Đủ hàng rồi quét tem đơn kế là mở luôn đơn đó. Mã không phải đơn (vd SKU) được tra như sản phẩm.
+- **Checklist đơn, cập nhật theo từng lần quét:**
+  - Khung "Đơn": từng sản phẩm đã quét/cần (✓ khi đủ), khung kết quả xanh hoặc đỏ (còn thiếu, cần lấy ra, mã không có trong kho).
+  - Khung chat: thẻ "📦 Checklist đơn" với cùng nội dung, sửa tại chỗ và dời xuống cuối sau mỗi lần quét; mỗi đơn một thẻ,
+    thẻ của đơn trước giữ lại tình trạng lúc chuyển đơn.
+  - Nút "In checklist": in riêng danh sách đơn (nền trắng chữ đen), mỗi dòng có ô ☐ để đánh dấu tay, dòng đã đủ in ☑.
 - **Trợ lý AI (tiếng Việt):** câu trả lời stream theo thời gian thực (SSE). AI dùng 4 tool gọi API của BE:
   `get_product`, `search_products`, `get_order`, `verify_order`. Lịch sử hội thoại lưu trong Postgres.
 - **Ổn định:** hủy lượt khi client ngắt kết nối, giới hạn thời gian mỗi lượt, mỗi hội thoại chạy từng lượt một
@@ -91,6 +99,7 @@ sequenceDiagram
     NV->>FE: Quét tem hoặc nhập mã đơn SO-104587
     FE->>BE: GET /api/orders/SO-104587
     BE-->>FE: danh sách sản phẩm cần đóng gói
+    FE-->>NV: Checklist (khung Đơn + thẻ trong chat), nút In checklist
     loop Mỗi sản phẩm bỏ vào hộp
         NV->>FE: Quét mã vạch
         alt Không phải barcode/SKU (QR chữ, URL)
@@ -100,11 +109,12 @@ sequenceDiagram
             BE-->>FE: thẻ sản phẩm
             FE->>BE: POST /api/orders/SO-104587/verify {tất cả mã đã quét}
             BE-->>FE: items, missing, extra, unknown, complete
-            FE-->>NV: Checklist + khung kết quả (xanh = được niêm phong, đỏ = chưa)
+            FE-->>NV: Cập nhật checklist (khung Đơn + thẻ chat) và khung kết quả (xanh = được niêm phong, đỏ = chưa)
             FE->>AI: POST /ai/chat {kết quả JSON của BE, không có mã quét thô}
             AI-->>FE: SSE: giải thích cần làm gì tiếp
         end
     end
+    Note over NV,FE: Đủ hàng rồi quét tem đơn kế thì mở đơn kế. Giữa chừng, tem đơn khác được đếm như mã lạ.
 ```
 
 ### Một lượt chat AI (SSE)
@@ -161,8 +171,8 @@ Nếu một migration lỗi, `migrate` thoát với mã khác 0 và `be`, `ai` k
 ├── .env.example                # mẫu biến môi trường
 └── src/barcode_chatbot/
     ├── fe/                     # trang quét + gateway nginx
-    │   ├── index.html          # giao diện: quét, checklist, khung kết quả, chat SSE
-    │   ├── core.js             # logic quét thuần (GS1, chuẩn hóa mã, đồng thuận nhiều khung hình, QR)
+    │   ├── index.html          # giao diện: camera, mở đơn, checklist (khung Đơn, chat, bản in), chat SSE
+    │   ├── core.js             # logic quét thuần (GS1, chuẩn hóa mã, đồng thuận nhiều khung hình, chống đếm trùng, QR)
     │   ├── core.test.js        # test logic quét (node)
     │   ├── default.conf.template  # cấu hình nginx
     │   └── e2e/                # test Playwright: server giả + kịch bản
@@ -277,9 +287,19 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 | Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |
 | Trang: logic quét + E2E Playwright (21 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
 
+Phạm vi test logic quét (`core.test.js`): số kiểm tra GS1, đồng thuận nhiều khung hình, chống đếm trùng (món để yên,
+món rời khung rồi quay lại, nhiều mã trong khung theo thứ tự bất kỳ, món nằm yên mà tạm không đọc được).
+
 Phạm vi E2E: kết luận do BE quyết định, QR chứa chữ không tới AI, SSE bị cắt giữa chừng, `error` → "Thử lại" với cùng
 `request_id`, stream đứt trước `done`, gộp các yêu cầu chờ, thử lại + gộp không nhận câu trả lời cũ, khóa khi đang tải đơn,
-verify lỗi → "KHÔNG niêm phong", response verify cũ về muộn không ghi đè kết luận mới, trạng thái "Đang tra kho…", quét tem đơn (mở đơn, giữa chừng không đổi đơn, đủ hàng thì mở đơn kế), in checklist, checklist trong chat cập nhật theo mỗi lần quét.
+verify lỗi → "KHÔNG niêm phong", response verify cũ về muộn không ghi đè kết luận mới, trạng thái "Đang tra kho…", quét tem đơn (mở đơn, giữa chừng không đổi đơn, đủ hàng thì mở đơn kế, tem để yên trước camera chỉ mở đơn một lần),
+mã không phải đơn được tra như sản phẩm, in checklist, checklist trong chat cập nhật theo mỗi lần quét, camera: món để yên
+đếm 1 lần, 2 món trong khung mỗi món 1 lần, lệnh giải mã treo không làm dừng quét, camera bị ngắt thì báo lỗi.
+
+Độ ổn định của camera với bộ giải mã thật được đo thủ công bằng video giả lập (`--use-file-for-fake-video-capture`):
+mã EAN-13 ở 15 điều kiện (đứng yên, xa 15–25% khung, lệch góc, nghiêng 20/45/60/90°, rung, mờ, tối + nhiễu, mờ + tối,
+chói, 2 món, khung trống) và lấy ra rồi đưa lại. Tất cả đọc được trong 0,6–2 s, mỗi món đếm đúng 1 lần, khung trống
+không đọc nhầm. Bộ video này không nằm trong repo (khoảng 1 GB).
 
 > Trên Windows dùng `127.0.0.1` thay cho `localhost`: `localhost` thử IPv6 trước và mỗi kết nối chờ khoảng 8 s.
 
@@ -324,6 +344,10 @@ Lỗi thường gặp:
   `fastly.jsdelivr.net`. Cả hai phải được phép trong CSP (`default.conf.template`) và qua được proxy/firewall công ty.
 - **Không mở được trang từ điện thoại/máy khác:** gateway chỉ nghe `127.0.0.1` và chỉ nhận Host `localhost`/`127.0.0.1`
   (`server_name` trong `default.conf.template`). Cần thêm đăng nhập và HTTPS rồi mới mở ra mạng.
+- **Camera không đọc được mã:** đưa mã vào khung nét đứt, đủ sáng, cách khoảng 15–30 cm; mã quá nhỏ trong khung thì
+  trang báo "move a little closer". Màn hình đứng hình thì bấm tắt rồi bật lại camera.
+- **Một món bị đếm 2 lần:** món bị lấy ra khỏi khung hơn 0,7 s rồi đưa lại, hoặc camera tự chỉnh sáng mạnh làm cả khung
+  đổi màu. Lấy món thừa ra theo khung kết quả (BE báo "Lấy ra khỏi hộp"), hoặc bấm "Quét lại từ đầu".
 - **AI báo 429 liên tục:** rate limit của gateway hoặc hết quota của nhà cung cấp LLM. Xem `docker compose logs ai | grep "rate limit"`.
 
 ## Giới hạn hiện tại
@@ -335,3 +359,9 @@ Lỗi thường gặp:
 - Đối chiếu đơn chỉ đọc: chưa lưu lịch sử đóng gói, chưa cập nhật trạng thái đơn, chưa trừ tồn kho.
 - Mã UPC-E (6–8 số) chưa được mở rộng thành UPC-A khi so khớp.
 - Chưa có migration kiểm tra checksum: sửa một file đã chạy sẽ không bị phát hiện.
+- Camera mới được đo bằng video giả lập, chưa thử với camera và tem thật; tự lấy nét chưa kiểm được (camera giả không có).
+- Phần so khung hình 32×24 (món nằm yên mà tạm không đọc được) chưa có test tự động; camera giả của Playwright chiếu
+  hình động nên luôn bị coi là đã đổi. Camera tự chỉnh sáng mạnh cũng bị coi là đổi khung, khi đó quay về đếm theo thời gian.
+- Khi không có mã trong khung, mỗi khung hình chạy cả 5 cách đọc: tốn CPU hơn, điện thoại yếu có thể nóng.
+- Mã đơn toàn số mà trùng dạng mã vạch sản phẩm hợp lệ sẽ bị đọc là sản phẩm; đơn kiểu đó phải nhập tay.
+- Chưa in được tem mã vạch cho đơn; tem đơn phải in từ hệ thống khác.
