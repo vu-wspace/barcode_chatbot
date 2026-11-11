@@ -267,6 +267,7 @@
   function setupTrackControls() {
     var caps = {}; try { caps = S.track.getCapabilities ? S.track.getCapabilities() : {}; } catch (e) {}
     $('torchBtn').hidden = !('torch' in caps);
+    if (caps.focusMode && caps.focusMode.indexOf('continuous') !== -1) applyConstraint({ focusMode: 'continuous' }); // soft focus is the hardest case to fix in software
     var z = $('zoom');
     if (caps.zoom) { z.min = caps.zoom.min || 1; z.max = caps.zoom.max || 5; z.step = caps.zoom.step || 0.1; z.value = (S.track.getSettings().zoom) || z.min; z.hidden = false; }
     else z.hidden = true;
@@ -281,15 +282,47 @@
     S.lastDetect = now;
     // a detect() that never settles would stop the loop for good (seen with the WASM decoder): give up on it
     var hung = new Promise(function (ok, fail) { setTimeout(function () { fail(new Error('detect-timeout')); }, CFG.detectTimeoutMs); });
-    Promise.race([S.detector.detect(v), hung]).then(function (codes) {
+    Promise.race([detectFrame(v), hung]).then(function (codes) {
       if (!S.scanning || S.paused) return;
       // several codes in view (two items, or a box with EAN + QR): read the first one not counted yet, so the next
       // item can go in while the last one is still in frame
       var now = Date.now(), pick = codes.filter(function (c) { return rearm.allowed(c.rawValue, now); })[0] || codes[0];
       if (pick) onDetect(pick);
       else { drawBox(null); agree.expire(Date.now()); feedback(isDark(v) ? 'Too dark, add more light' : 'Point your camera at a barcode', isDark(v) ? 'warn' : ''); }
-      rearm.see(codes.map(function (c) { return c.rawValue; }), Date.now()); // after onDetect: it asks about the time before this frame
+      var th = thumb(v); if (codes.length) S.ref = th;
+      rearm.see(codes.map(function (c) { return c.rawValue; }), Date.now(), !codes.length && !sceneMoved(th, S.ref)); // after onDetect: it asks about the time before this frame
     }).catch(function () {}).then(function () { if (S.scanning && !S.paused) requestAnimationFrame(loop); });
+  }
+
+  // Retries for a frame the plain read misses, measured on the ZXing WASM decoder (Chrome on Windows): half size
+  // averages out sensor noise in dim light, a hard contrast boost recovers a soft focus, and ±45° turns a diagonal
+  // barcode back into one a 1D reader can scan. The one that last worked goes first, so a held item reads every frame.
+  var VARIANTS = [{}, { scale: 0.5 }, { filter: 'grayscale(1) contrast(3)' }, { rot: Math.PI / 4 }, { rot: -Math.PI / 4 }];
+  var fbC = document.createElement('canvas');
+  function variantSource(v, x) {
+    if (!x.scale && !x.filter && !x.rot) return v;
+    var w = v.videoWidth, h = v.videoHeight, k = x.scale || 1;
+    fbC.width = w * k; fbC.height = h * k; // also resets the context's transform and filter
+    var c = fbC.getContext('2d'); c.filter = x.filter || 'none';
+    if (x.rot) { c.translate(w / 2, h / 2); c.rotate(x.rot); c.drawImage(v, -w / 2, -h / 2); } else c.drawImage(v, 0, 0, w * k, h * k);
+    return fbC;
+  }
+  function detectFrame(v) {
+    var order = [S.variant || 0].concat(VARIANTS.map(function (x, i) { return i; }).filter(function (i) { return i !== (S.variant || 0); }));
+    var i = 0;
+    function next() {
+      if (i >= order.length || !S.scanning) return Promise.resolve([]);
+      var n = order[i++], x = VARIANTS[n];
+      return S.detector.detect(variantSource(v, x)).then(function (codes) {
+        if (!codes.length) return next();
+        S.variant = n;
+        return codes.map(function (c) { // boxes back in video pixels; a rotated read has no usable box
+          var b = c.boundingBox, k = x.scale || 1;
+          return { rawValue: c.rawValue, format: c.format, boundingBox: x.rot || !b ? null : { x: b.x / k, y: b.y / k, width: b.width / k, height: b.height / k } };
+        });
+      });
+    }
+    return next();
   }
 
   function onDetect(code) {
@@ -328,6 +361,23 @@
     ctx.strokeStyle = '#72b542'; ctx.lineWidth = 3; ctx.strokeRect(b.x * sx, b.y * sy, b.width * sx, b.height * sy);
   }
 
+  // 32x24 grey thumbnail: tells "decoder missed the item" (picture unchanged) from "item taken away" (picture changed)
+  var thumbC = document.createElement('canvas'); thumbC.width = 32; thumbC.height = 24;
+  function thumb(v) {
+    try {
+      var c = thumbC.getContext('2d', { willReadFrequently: true }); c.drawImage(v, 0, 0, 32, 24);
+      var d = c.getImageData(0, 0, 32, 24).data, g = new Uint8Array(768);
+      for (var i = 0; i < 768; i++) g[i] = d[i * 4] * .299 + d[i * 4 + 1] * .587 + d[i * 4 + 2] * .114;
+      return g;
+    } catch (e) { return null; }
+  }
+  // moved = at least 4 cells (0.5%) changed by more than 24 levels: sensor noise averages out in a cell, a label
+  // leaving the frame does not even when far away. No thumbnail = assume moved (the old, time-only behaviour).
+  function sceneMoved(a, b) {
+    if (!a || !b) return true;
+    for (var i = 0, n = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 24 && ++n >= 4) return true;
+    return false;
+  }
   var darkC = document.createElement('canvas'); darkC.width = 32; darkC.height = 24;
   function isDark(v) {
     try {

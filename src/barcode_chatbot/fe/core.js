@@ -57,14 +57,16 @@
     return {
       // call on every detect result while scanning (values = every code read in the frame, or null), AFTER asking
       // allowed(). A value is in view while ANY code in the frame is it (the decoder lists them in any order).
-      see: function (values, now) {
+      // still = nothing in the picture changed since the last read: the item is still there, the decoder just missed it
+      // (in poor light it can miss for seconds), so that does not start an absence. Taking an item away changes the picture.
+      see: function (values, now, still) {
         var here = [].concat(values);
         Object.keys(blocked).forEach(function (v) {
           var gone = blocked[v] !== null && now - blocked[v] >= goneMs;
           // back after a long enough absence = a new unit (its reads must still agree); a short one = the same item
           if (here.indexOf(v) !== -1) { if (gone) delete blocked[v]; else blocked[v] = null; }
           else if (gone) delete blocked[v];
-          else if (blocked[v] === null) blocked[v] = now;
+          else if (blocked[v] === null && !still) blocked[v] = now;
         });
       },
       allowed: function (value, now) { return !(value in blocked) || (blocked[value] !== null && now - blocked[value] >= goneMs); },

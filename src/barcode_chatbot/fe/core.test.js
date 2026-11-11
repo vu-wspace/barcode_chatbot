@@ -43,6 +43,12 @@ r.see(null, 7300);
 r.see('X', 7600);                                   // gone only 300 ms: same unit, still blocked
 assert.ok(!r.allowed('X', 7700));
 r.reset();
+r.accepted('S');                                    // held still, the decoder misses it for 4 s
+r.see('S', 0); r.see(null, 100, true); r.see(null, 4100, true);
+assert.ok(!r.allowed('S', 4200));                   // the picture never changed: same item, not counted again
+r.see(null, 4300, false); r.see(null, 5100, false);  // then it is taken away
+assert.ok(r.allowed('S', 5100));
+r.reset();
 r.accepted('Q');                                    // two codes in view, the decoder lists them in either order
 r.see(['P', 'Q'], 0); r.see(['Q', 'P'], 500); r.see(['P', 'Q'], 1000);
 assert.ok(!r.allowed('Q', 1100));                   // Q never left: not counted again

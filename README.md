@@ -30,6 +30,8 @@ lời câu hỏi về sản phẩm và đơn hàng.
   Sản phẩm để yên trước camera chỉ được đếm một lần: phải rời khung ít nhất 0,7 s thì cùng mã mới được
   đếm tiếp (hai sản phẩm giống nhau vẫn quét được liên tiếp). Nhiều mã cùng trong khung: mỗi món chỉ đếm một lần,
   món mới được đọc dù món cũ còn trong khung. Camera bị ngắt thì báo lỗi; lệnh giải mã treo quá 3 s thì bỏ qua và quét tiếp.
+  Khung hình đọc thường không ra thì thử lại: ảnh thu nhỏ một nửa (đỡ nhiễu khi tối), tăng tương phản (ảnh mờ), xoay ±45°
+  (mã cầm chéo). Món để yên mà tạm không đọc được (ảnh 32×24 không đổi) không bị coi là đã lấy ra, nên không đếm lại.
   Nhập tay cũng kiểm tra số kiểm tra GS1.
 - **Tra sản phẩm:** tên, SKU, danh mục, giá, tồn kho. Mã EAN-13 có số 0 đầu, UPC-A 12 số và GTIN-14 được coi là cùng một mã.
 - **Kiểm tra đơn:** quét tem mã đơn (hoặc nhập tay) để mở checklist từng sản phẩm (đã quét/cần), cập nhật ngay mỗi lần quét;
