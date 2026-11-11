@@ -1,0 +1,23 @@
+- generic [ref=f1e1]:
+  - main [ref=f1e2]:
+    - heading "Barcode Scanner" [level=1] [ref=f1e3]
+    - generic [ref=f1e4]:
+      - tablist [ref=f1e5]:
+        - tab "📷 Camera" [ref=f1e6] [cursor=pointer]
+        - tab "📁 Upload image" [active] [selected] [ref=f1e7] [cursor=pointer]
+      - button "Choose or drop an image" [ref=f1e31] [cursor=pointer]:
+        - generic [ref=f1e32]: Drop an image here or click to choose
+      - generic [ref=f1e19]:
+        - textbox "Barcode number" [ref=f1e20]:
+          - /placeholder: Or type a barcode number (6–14 digits)
+        - button "Look up" [ref=f1e21] [cursor=pointer]
+    - generic [ref=f1e22]:
+      - generic [ref=f1e23]:
+        - strong [ref=f1e24]: History
+        - generic [ref=f1e25]:
+          - button "Export CSV" [ref=f1e26] [cursor=pointer]
+          - button "Copy all" [ref=f1e27] [cursor=pointer]
+          - button "Clear" [ref=f1e28] [cursor=pointer]
+      - list
+      - paragraph [ref=f1e29]: No scans yet.
+  - status

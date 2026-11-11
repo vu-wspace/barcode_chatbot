@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Barcode Scanner</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --muted:#667; --line:#dde1e6; --accent:#72b542; --err:#d64545; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --card:#1d2126; --fg:#e8ebee; --muted:#9aa3ad; --line:#2e343b; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:720px; margin:0 auto; padding:16px; }
+  h1 { font-size:1.4rem; margin:.2em 0 .6em; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  button, .btn { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:8px; padding:8px 14px; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }
+  button.primary, .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .tabs button[aria-selected="true"] { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .stage { position:relative; background:#000; border-radius:10px; overflow:hidden; aspect-ratio:16/9; display:grid; place-items:center; }
+  .stage video, .stage canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:fill; }
+  .stage video[hidden] { display:none; }
+  .controls { position:absolute; top:8px; right:8px; display:flex; flex-direction:column; gap:6px; z-index:2; }
+  .controls button { background:rgba(0,0,0,.55); color:#fff; border:0; width:40px; height:40px; justify-content:center; padding:0; }
+  .controls button.on { background:var(--accent); }
+  #zoom { position:absolute; left:12px; bottom:12px; width:40%; z-index:2; }
+  .guide { position:absolute; inset:22% 12%; border:2px dashed rgba(255,255,255,.5); border-radius:8px; z-index:1; pointer-events:none; }
+  .stage.locked .guide { border:3px solid var(--accent); }
+  #feedback { min-height:1.5em; margin:8px 0 0; color:var(--muted); }
+  #feedback.warn { color:#c98a00; } #feedback.ok { color:var(--accent); }
+  .drop { border:2px dashed var(--line); border-radius:10px; padding:28px; text-align:center; cursor:pointer; }
+  .drop.over { border-color:var(--accent); }
+  .drop img { max-width:100%; max-height:280px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  input[type=text] { font:inherit; flex:1; min-width:0; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); }
+  .result .val { font:600 1.3rem/1.3 ui-monospace, monospace; word-break:break-all; }
+  .tag { display:inline-block; font-size:.8rem; padding:2px 8px; border-radius:99px; background:var(--accent); color:#fff; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin:10px 0 0; } dt { color:var(--muted); } dd { margin:0; word-break:break-all; }
+  ul.hist { list-style:none; padding:0; margin:8px 0 0; }
+  ul.hist li { display:flex; gap:8px; align-items:center; padding:8px 0; border-top:1px solid var(--line); }
+  ul.hist li .v { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:ui-monospace, monospace; cursor:pointer; }
+  ul.hist li button { padding:4px 8px; }
+  #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#222; color:#fff; padding:10px 16px; border-radius:8px; opacity:0; transition:opacity .2s; pointer-events:none; max-width:calc(100% - 32px); }
+  #toast.show { opacity:1; } #toast.err { background:var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Barcode Scanner</h1>
+
+  <section class="card">
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tabCam" aria-selected="true">📷 Camera</button>
+      <button role="tab" id="tabUp" aria-selected="false">📁 Upload image</button>
+    </div>
+
+    <div id="camMode">
+      <div class="stage" id="stage">
+        <video id="video" playsinline muted hidden></video>
+        <canvas id="overlay"></canvas>
+        <div class="guide" hidden id="guide"></div>
+        <button class="primary" id="startBtn" style="z-index:2">▶ Start camera</button>
+        <div class="controls" id="controls" hidden>
+          <button id="stopBtn" title="Stop camera" aria-label="Stop camera">✕</button>
+          <button id="flipBtn" title="Flip camera" aria-label="Flip camera">🔄</button>
+          <button id="torchBtn" title="Toggle light" aria-label="Toggle light" hidden>🔦</button>
+          <button id="beepBtn" title="Sound on scan" aria-label="Sound on scan" class="on">🔊</button>
+          <button id="batchBtn" title="Batch mode (short pause between scans)" aria-label="Batch mode">⚡</button>
+        </div>
+        <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" aria-label="Zoom" hidden>
+      </div>
+      <p id="feedback" aria-live="polite"></p>
+    </div>
+
+    <div id="upMode" hidden>
+      <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose or drop an image">
+        <div id="dropText">Drop an image here or click to choose</div>
+        <img id="preview" alt="" hidden>
+      </div>
+      <input type="file" id="file" accept="image/*" hidden>
+    </div>
+
+    <div class="row">
+      <input type="text" id="manual" placeholder="Or type a barcode number (6–14 digits)" inputmode="numeric" aria-label="Barcode number">
+      <button id="manualBtn">Look up</button>
+    </div>
+  </section>
+
+  <section class="card result" id="result" hidden></section>
+
+  <section class="card">
+    <div class="row" style="margin:0;justify-content:space-between">
+      <strong>History</strong>
+      <span class="row" style="margin:0">
+        <button id="csvBtn">Export CSV</button>
+        <button id="copyAllBtn">Copy all</button>
+        <button id="clearBtn">Clear</button>
+      </span>
+    </div>
+    <ul class="hist" id="hist"></ul>
+    <p class="muted" id="histEmpty">No scans yet.</p>
+  </section>
+</main>
+<div id="toast" role="status"></div>
+
+<script src="core.js"></script>
+<script>
+(function () {
+  'use strict';
+  var CFG = {
+    polyfill: 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.3/dist/iife/polyfill.min.js',
+    formats: ['qr_code','aztec','codabar','code_39','code_93','code_128','data_matrix','ean_8','ean_13','itf','pdf417','upc_a','upc_e'],
+    detectIntervalMs: 80, requiredAgreement: 3, agreeWindowMs: 1500, pauseMs: 5000, batchPauseMs: 1200,
+    maxHistory: 100, historyKey: 'scanner_history_v1', settingsKey: 'scanner_settings_v1',
+  };
+  var NAMES = { qr_code:'QR Code', aztec:'Aztec', codabar:'Codabar', code_39:'Code 39', code_93:'Code 93', code_128:'Code 128', data_matrix:'Data Matrix', ean_8:'EAN-8', ean_13:'EAN-13', itf:'ITF', pdf417:'PDF417', upc_a:'UPC-A', upc_e:'UPC-E', asin:'ASIN', unknown:'Unknown' };
+  var $ = function (id) { return document.getElementById(id); };
+  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null };
+  var agree = ScanCore.createAgreement(CFG.requiredAgreement, CFG.agreeWindowMs);
+
+  // --- storage (localStorage can throw in private mode) ---
+  function load(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
+  function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+
+  // --- decoder: native BarcodeDetector (Chrome/Android) or the ZXing-C++ WASM polyfill everywhere else ---
+  var polyfillP = null;
+  function ensureDetector() {
+    if (S.detector) return Promise.resolve(S.detector);
+    var ready = 'BarcodeDetector' in window ? Promise.resolve() : (polyfillP = polyfillP || new Promise(function (ok, fail) {
+      var s = document.createElement('script'); s.src = CFG.polyfill; s.onload = ok; s.onerror = function () { fail(new Error('polyfill-failed')); };
+      document.head.appendChild(s);
+    }));
+    return ready.then(function () {
+      var BD = window.BarcodeDetector;
+      return (BD.getSupportedFormats ? BD.getSupportedFormats() : Promise.resolve(CFG.formats)).catch(function () { return CFG.formats; });
+    }).then(function (sup) {
+      var use = CFG.formats.filter(function (f) { return sup.indexOf(f) !== -1; });
+      try { S.detector = new BarcodeDetector({ formats: use.length ? use : CFG.formats }); } catch (e) { S.detector = new BarcodeDetector(); }
+      return S.detector;
+    });
+  }
+
+  // --- UI helpers ---
+  var toastT;
+  function toast(msg, err) { var t = $('toast'); t.textContent = msg; t.className = 'show' + (err ? ' err' : ''); clearTimeout(toastT); toastT = setTimeout(function () { t.className = ''; }, 3000); }
+  function feedback(msg, cls) { $('feedback').textContent = msg || ''; $('feedback').className = cls || ''; }
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]; }); }
+  function safeHref(h) { return /^(https?:|mailto:|tel:|sms:)/i.test(h) ? h : '#'; }
+
+  function setMode(cam) {
+    $('tabCam').setAttribute('aria-selected', cam); $('tabUp').setAttribute('aria-selected', !cam);
+    $('camMode').hidden = !cam; $('upMode').hidden = cam;
+    if (!cam && S.scanning) stopCamera();
+  }
+
+  // --- camera ---
+  function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('Camera not available here (needs HTTPS). Upload an image or type the number.', true); return; }
+    ensureDetector().then(function () {
+      return navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: S.facing }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    }).then(function (stream) {
+      S.stream = stream; S.track = stream.getVideoTracks()[0] || null;
+      var v = $('video'); v.srcObject = stream; v.hidden = false;
+      $('startBtn').hidden = true; $('controls').hidden = false; $('guide').hidden = false;
+      if (!S.audio) { try { S.audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} } // must be created inside a user gesture
+      setupTrackControls();
+      return v.play();
+    }).then(function () {
+      S.scanning = true; S.paused = false; agree.reset();
+      feedback('Point your camera at a barcode');
+      requestAnimationFrame(loop);
+    }).catch(function (err) {
+      var msg = err && err.name === 'NotAllowedError' ? 'Camera permission was denied.'
+        : err && err.message === 'polyfill-failed' ? 'Could not load the barcode decoder.' : 'Could not start the camera.';
+      toast(msg, true); stopCamera(); $('manual').focus();
+    });
+  }
+
+  function stopCamera() {
+    S.scanning = false; S.paused = false; clearTimeout(S.pauseTimer);
+    if (S.stream) S.stream.getTracks().forEach(function (t) { t.stop(); });
+    S.stream = S.track = null; S.torch = false;
+    var v = $('video'); v.srcObject = null; v.hidden = true;
+    $('startBtn').hidden = false; $('controls').hidden = true; $('guide').hidden = true; $('zoom').hidden = true;
+    $('stage').classList.remove('locked'); drawBox(null); feedback('');
+  }
+
+  function flipCamera() { S.facing = S.facing === 'environment' ? 'user' : 'environment'; stopCamera(); setTimeout(startCamera, 200); }
+
+  // Torch / zoom are only exposed by some devices (mostly Android Chrome).
+  function setupTrackControls() {
+    var caps = {}; try { caps = S.track.getCapabilities ? S.track.getCapabilities() : {}; } catch (e) {}
+    $('torchBtn').hidden = !('torch' in caps);
+    var z = $('zoom');
+    if (caps.zoom) { z.min = caps.zoom.min || 1; z.max = caps.zoom.max || 5; z.step = caps.zoom.step || 0.1; z.value = (S.track.getSettings().zoom) || z.min; z.hidden = false; }
+    else z.hidden = true;
+  }
+  function applyConstraint(c) { if (S.track) S.track.applyConstraints({ advanced: [c] }).catch(function () {}); }
+
+  // Throttled detect loop: one detect() in flight at a time, at most every detectIntervalMs.
+  function loop() {
+    if (!S.scanning || S.paused) return;
+    var v = $('video'), now = Date.now();
+    if (v.readyState < 2 || !v.videoWidth || now - S.lastDetect < CFG.detectIntervalMs) { requestAnimationFrame(loop); return; }
+    S.lastDetect = now;
+    S.detector.detect(v).then(function (codes) {
+      if (!S.scanning || S.paused) return;
+      if (codes.length) onDetect(codes[0]);
+      else { drawBox(null); agree.expire(Date.now()); feedback(isDark(v) ? 'Too dark, add more light' : 'Point your camera at a barcode', isDark(v) ? 'warn' : ''); }
+    }).catch(function () {}).then(function () { if (S.scanning && !S.paused) requestAnimationFrame(loop); });
+  }
+
+  function onDetect(code) {
+    var raw = code.rawValue, fmt = (code.format || '').toLowerCase(), v = $('video');
+    drawBox(code.boundingBox);
+    if (!ScanCore.isReadTrustworthy(raw, fmt)) { feedback('Reading, hold steady', 'warn'); return; }
+    var r = agree.push(raw, Date.now());
+    if (r.accepted) {
+      accept(raw, fmt, 'camera');
+      pause(S.batch ? CFG.batchPauseMs : CFG.pauseMs);
+    } else {
+      var small = code.boundingBox && code.boundingBox.width / v.videoWidth < 0.25;
+      feedback(small ? 'Barcode detected, move a little closer' : 'Verifying, hold steady (' + r.count + '/' + CFG.requiredAgreement + ')', 'warn');
+    }
+  }
+
+  function pause(ms) {
+    S.paused = true; drawBox(null); $('stage').classList.add('locked');
+    feedback(S.batch ? 'Scanned, keep going' : 'Scanned. Paused for ' + ms / 1000 + ' seconds', 'ok');
+    clearTimeout(S.pauseTimer);
+    S.pauseTimer = setTimeout(function () {
+      S.paused = false; agree.reset(); $('stage').classList.remove('locked');
+      if (S.scanning) { feedback('Point your camera at a barcode'); requestAnimationFrame(loop); }
+    }, ms);
+  }
+
+  // boundingBox is in video pixels; the canvas is stretched over the video with object-fit:fill, so a plain scale works.
+  function drawBox(b) {
+    var c = $('overlay'), v = $('video'), r = c.getBoundingClientRect();
+    if (c.width !== Math.round(r.width) || c.height !== Math.round(r.height)) { c.width = r.width; c.height = r.height; }
+    var ctx = c.getContext('2d'); ctx.clearRect(0, 0, c.width, c.height);
+    if (!b || !v.videoWidth) return;
+    var sx = c.width / v.videoWidth, sy = c.height / v.videoHeight;
+    ctx.strokeStyle = '#72b542'; ctx.lineWidth = 3; ctx.strokeRect(b.x * sx, b.y * sy, b.width * sx, b.height * sy);
+  }
+
+  var darkC = document.createElement('canvas'); darkC.width = 32; darkC.height = 24;
+  function isDark(v) {
+    try {
+      var ctx = darkC.getContext('2d', { willReadFrequently: true }); ctx.drawImage(v, 0, 0, 32, 24);
+      var d = ctx.getImageData(0, 0, 32, 24).data, sum = 0;
+      for (var i = 0; i < d.length; i += 4) sum += d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
+      return sum / (d.length / 4) < 45;
+    } catch (e) { return false; }
+  }
+
+  function beep() {
+    if (!S.beep || !S.audio) return;
+    try { var o = S.audio.createOscillator(), g = S.audio.createGain(); o.frequency.value = 880; g.gain.value = .06; o.connect(g); g.connect(S.audio.destination); o.start(); o.stop(S.audio.currentTime + .12); } catch (e) {}
+  }
+
+  // --- upload ---
+  var upFile = null;
+  function pickFile(f) {
+    if (!f || f.type.indexOf('image/') !== 0) { toast('Please choose an image file', true); return; }
+    upFile = f;
+    var p = $('preview'); p.src = URL.createObjectURL(f); p.hidden = false; $('dropText').hidden = true;
+    p.onload = function () { scanImage(p); };
+  }
+  function scanImage(img) {
+    ensureDetector().then(function (d) { return d.detect(img); }).then(function (codes) {
+      if (codes.length) codes.forEach(function (c) { accept(c.rawValue, c.format, 'upload'); });
+      else toast('No barcode found in image', true);
+    }).catch(function () { toast('No barcode found in image', true); });
+  }
+
+  // --- manual ---
+  function manual() {
+    var v = $('manual').value.trim().toUpperCase();
+    if (!/^\d{6,14}$/.test(v) && !/^B[0-9A-Z]{9}$/.test(v)) { toast('Enter a 6 to 14 digit barcode number', true); return; }
+    accept(v, ScanCore.formatFromValue(v), 'manual'); $('manual').value = '';
+  }
+
+  // --- results + history ---
+  function accept(raw, fmt, source) {
+    var n = ScanCore.normalizeCode(raw, fmt), value = n.value, format = n.format || ScanCore.formatFromValue(value), now = Date.now();
+    if (S.history[0] && S.history[0].value === value && now - S.history[0].ts < 2000) return; // dedupe double-fires
+    S.history.unshift({ value: value, format: format, ts: now, source: source });
+    S.history.length = Math.min(S.history.length, CFG.maxHistory);
+    save(CFG.historyKey, S.history);
+    renderResult(S.history[0]); renderHistory();
+    toast('Scanned: ' + value); beep(); if (navigator.vibrate) navigator.vibrate(80);
+  }
+
+  function renderResult(e) {
+    var box = $('result'), q = encodeURIComponent(e.value), html = '<span class="tag">' + esc(NAMES[e.format] || e.format) + '</span> <span class="muted">' + esc(e.source) + ' · ' + new Date(e.ts).toLocaleString() + '</span><div class="val" style="margin-top:6px">' + esc(e.value) + '</div>';
+    var retail = /^\d{8,14}$/.test(e.value);
+    if (retail || e.format === 'asin') {
+      html += '<div class="row">' + [
+        ['Amazon', e.format === 'asin' ? 'https://www.amazon.com/dp/' + q : 'https://www.amazon.com/s?k=' + q],
+        ['eBay', 'https://www.ebay.com/sch/i.html?_nkw=' + q], ['Walmart', 'https://www.walmart.com/search?q=' + q], ['Google', 'https://www.google.com/search?q=' + q],
+      ].map(function (l) { return '<a class="btn" target="_blank" rel="nofollow noopener" href="' + esc(l[1]) + '">' + l[0] + '</a>'; }).join('') + '</div>';
+    } else {
+      var p = ScanCore.parseQr(e.value), keys = Object.keys(p.fields).filter(function (k) { return p.fields[k]; });
+      html += '<p class="muted" style="margin:6px 0 0">' + esc(p.label) + '</p>';
+      if (keys.length) html += '<dl>' + keys.map(function (k) { return '<dt>' + esc(k) + '</dt><dd>' + esc(p.fields[k]) + '</dd>'; }).join('') + '</dl>';
+      if (p.href) html += '<div class="row"><a class="btn primary" target="_blank" rel="nofollow noopener" href="' + esc(safeHref(p.href)) + '">Open</a></div>';
+    }
+    html += '<div class="row"><button data-copy="' + esc(e.value) + '">Copy</button></div>';
+    box.innerHTML = html; box.hidden = false;
+  }
+
+  function renderHistory() {
+    $('histEmpty').hidden = S.history.length > 0;
+    $('hist').innerHTML = S.history.map(function (e, i) {
+      return '<li><span class="tag">' + esc(NAMES[e.format] || e.format) + '</span><span class="v" data-show="' + i + '" title="' + esc(e.value) + '">' + esc(e.value) + '</span>' +
+        '<button data-copy="' + esc(e.value) + '" aria-label="Copy">⧉</button><button data-del="' + i + '" aria-label="Delete">✕</button></li>';
+    }).join('');
+  }
+
+  function copy(t) { (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(function () { toast('Copied'); }, function () { toast('Copy failed', true); }); }
+
+  function exportCsv() {
+    if (!S.history.length) return;
+    var q = function (s) { return '"' + String(s).replace(/"/g, '""') + '"'; };
+    var csv = 'value,format,source,scanned_at\n' + S.history.map(function (e) { return [q(e.value), q(NAMES[e.format] || e.format), q(e.source), q(new Date(e.ts).toISOString())].join(','); }).join('\n');
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'barcode-scans.csv'; a.click();
+  }
+
+  // --- wiring ---
+  $('tabCam').onclick = function () { setMode(true); };
+  $('tabUp').onclick = function () { setMode(false); };
+  $('startBtn').onclick = startCamera;
+  $('stopBtn').onclick = stopCamera;
+  $('flipBtn').onclick = flipCamera;
+  $('torchBtn').onclick = function () { S.torch = !S.torch; this.classList.toggle('on', S.torch); applyConstraint({ torch: S.torch }); };
+  $('zoom').oninput = function () { applyConstraint({ zoom: parseFloat(this.value) }); };
+  $('video').onclick = function () { applyConstraint({ focusMode: 'single-shot' }); };
+  $('beepBtn').onclick = function () { S.beep = !S.beep; this.textContent = S.beep ? '🔊' : '🔇'; this.classList.toggle('on', S.beep); save(CFG.settingsKey, { beep: S.beep, batch: S.batch }); };
+  $('batchBtn').onclick = function () { S.batch = !S.batch; this.classList.toggle('on', S.batch); save(CFG.settingsKey, { beep: S.beep, batch: S.batch }); };
+  $('manualBtn').onclick = manual;
+  $('manual').onkeydown = function (e) { if (e.key === 'Enter') manual(); };
+  var drop = $('drop');
+  drop.onclick = function () { $('file').click(); };
+  drop.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('file').click(); } };
+  $('file').onchange = function () { pickFile(this.files[0]); this.value = ''; };
+  drop.ondragover = function (e) { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = function () { drop.classList.remove('over'); };
+  drop.ondrop = function (e) { e.preventDefault(); drop.classList.remove('over'); pickFile(e.dataTransfer.files[0]); };
+  document.addEventListener('paste', function (e) { var f = [].find.call(e.clipboardData.files || [], function (f) { return f.type.indexOf('image/') === 0; }); if (f) { setMode(false); pickFile(f); } });
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-copy],[data-del],[data-show]'); if (!t) return;
+    if (t.dataset.copy != null) copy(t.dataset.copy);
+    else if (t.dataset.del != null) { S.history.splice(+t.dataset.del, 1); save(CFG.historyKey, S.history); renderHistory(); }
+    else renderResult(S.history[+t.dataset.show]);
+  });
+  $('csvBtn').onclick = exportCsv;
+  $('copyAllBtn').onclick = function () { if (S.history.length) copy(S.history.map(function (e) { return e.value; }).join('\n')); };
+  $('clearBtn').onclick = function () { if (S.history.length && confirm('Clear all scan history?')) { S.history = []; save(CFG.historyKey, []); renderHistory(); $('result').hidden = true; } };
+  // Release the camera when the tab is hidden; Safari otherwise keeps the camera light on.
+  document.addEventListener('visibilitychange', function () { if (document.hidden && S.scanning) stopCamera(); });
+
+  S.history = load(CFG.historyKey, []);
+  var st = load(CFG.settingsKey, {});
+  if (st.beep === false) { S.beep = false; $('beepBtn').textContent = '🔇'; $('beepBtn').classList.remove('on'); }
+  if (st.batch) { S.batch = true; $('batchBtn').classList.add('on'); }
+  renderHistory();
+  ensureDetector().catch(function () {}); // warm up the WASM decoder so the first scan is fast
+})();
+</script>
+</body>
+</html>

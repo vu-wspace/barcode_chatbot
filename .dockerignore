@@ -1,0 +1,11 @@
+# Image chỉ cần: pyproject.toml, uv.lock, README.md, certs/, src/, data/ (xem Dockerfile)
+.git
+.env
+.venv
+.langgraph_api
+.pytest_cache
+.ruff_cache
+**/__pycache__
+*.py[oc]
+tests
+evals

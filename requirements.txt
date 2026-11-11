@@ -1,0 +1,40 @@
+# Danh sách thư viện cho người dùng pip. Nguồn chính là pyproject.toml + uv.lock (cài bằng `uv sync`);
+# sửa thư viện ở pyproject.toml rồi cập nhật file này cho khớp.
+#   pip install -r requirements.txt
+
+# torch bản CPU (không kéo bộ CUDA vài GB)
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# LangChain / LangGraph
+langchain>=1.4.7
+langchain-core>=1.7.0
+langgraph>=1.2.16
+
+# LLM
+langchain-openrouter>=0.2.9
+langchain-google-genai>=4.4.2
+langchain-groq>=1.1.3
+
+# Tool tìm kiếm web
+tavily-python>=0.8.5
+
+# Vector DB
+qdrant-client>=1.20.0
+langchain-qdrant>=1.1.0
+
+# Embedding + xử lý tiếng Việt
+torch>=2.14.1
+sentence-transformers>=6.2.0
+pyvi>=0.1.1
+
+# Web app
+fastapi>=0.120.0
+uvicorn[standard]>=0.38.0
+
+# Tiện ích
+pandas>=3.1.0
+python-dotenv>=1.2.4
+truststore>=0.10.5
+
+# Phát triển (không cần khi deploy) - cài riêng nếu cần:
+#   pip install pytest>=8.4.0 "langgraph-cli[inmem]>=0.4.8"

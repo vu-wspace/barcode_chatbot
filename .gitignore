@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv
+
+# Cache của công cụ
+.langgraph_api/
+.pytest_cache/
+.ruff_cache/
+
+# Kết quả chạy eval (mỗi lần chạy 1 file JSON)
+evals/results/
+
+# Secrets
+.env
+
+# CA nội bộ cho mạng có SSL inspection (xem README)
+certs/*.crt

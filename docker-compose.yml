@@ -1,0 +1,27 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.20.0   # ghim phiên bản, khớp qdrant-client trong pyproject.toml
+    container_name: qdrant
+    ports:
+      - "6333:6333"   # REST API + dashboard (cũng dùng khi chạy code trên máy, không Docker)
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage   # Docker volume: dữ liệu còn khi xóa container, mất khi `down -v`
+    restart: unless-stopped
+
+  api:
+    build: .
+    image: bank-faqs-api
+    container_name: bank_faqs_api
+    ports:
+      - "8000:8000"   # Web chat + API (docs tại /docs)
+    env_file: .env    # OPENROUTER_API_KEY, GOOGLE_API_KEY, GROQ_API_KEY, TAVILY_API_KEY, LANGSMITH_*
+    environment:
+      QDRANT_URL: http://qdrant:6333   # ghi đè QDRANT_URL=localhost trong .env
+      AUTO_INGEST: "true"              # collection rỗng thì tự nạp dữ liệu khi khởi động
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
