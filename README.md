@@ -30,3 +30,13 @@ docker compose exec be python -m app.server check     # BE against the real DB
 cd src/barcode_chatbot/agent && uv run pytest         # agent (no LLM or BE needed)
 node src/barcode_chatbot/fe/core.test.js              # scanner logic
 ```
+
+## Database changes (migrations)
+
+The BE applies `src/barcode_chatbot/be/app/migrations/NNN_name.sql` at start, in name order, each file once
+(recorded in the `schema_migrations` table). One run is one transaction, so a failing file leaves the DB unchanged
+and the BE does not start.
+
+- Add a new file with the next number, e.g. `002_add_product_weight.sql`. Never edit a file that has been applied.
+- Rename/retype columns or move data in the new file; there is no down migration, so write the reverse by hand if needed.
+- Demo data stays in `seed.sql` (loaded while `SEED_DEMO=true`), not in migrations.

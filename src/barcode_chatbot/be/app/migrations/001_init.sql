@@ -1,4 +1,5 @@
--- Applied on every server start; every statement is idempotent.
+-- First migration: products, orders, order_items + search indexes. Idempotent, so it also applies cleanly to
+-- databases created before migrations existed (when schema.sql ran on every start).
 
 CREATE TABLE IF NOT EXISTS products (
     sku      text PRIMARY KEY,

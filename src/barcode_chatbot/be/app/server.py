@@ -30,17 +30,45 @@ pool = ConnectionPool(os.getenv("DATABASE_URL", ""), open=False, min_size=1, max
                       kwargs={"row_factory": dict_row})
 
 
+MIGRATIONS = HERE / "migrations"
+
+
+def migrate(conn, folder: Path = MIGRATIONS) -> list[str]:
+    """Run migrations/NNN_name.sql files not yet in schema_migrations, in name order; returns the names run.
+
+    All in one transaction: a failing file rolls back every file of this run, so the DB is never half-migrated.
+    The advisory lock makes BE containers that start together wait for each other instead of running a file twice.
+    Never edit a file that has been applied: add a new one. shortcut: no checksum detects an edited file.
+    """
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext('barcode_chatbot.migrate'))")
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations ("
+                     "name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())")
+        done = {r["name"] for r in conn.execute("SELECT name FROM schema_migrations")}
+        ran = []
+        for f in sorted(folder.glob("*.sql")):
+            if f.name not in done:
+                conn.execute(f.read_text(encoding="utf-8"))
+                conn.execute("INSERT INTO schema_migrations (name) VALUES (%s)", (f.name,))
+                ran.append(f.name)
+        return ran
+
+
 @asynccontextmanager
 async def lifespan(_):
     if not os.getenv("DATABASE_URL"):
         raise RuntimeError("DATABASE_URL is not set (add it to .env)")
     pool.open(wait=True, timeout=30)
-    with pool.connection() as conn:
-        conn.execute((HERE / "schema.sql").read_text(encoding="utf-8"))
-        if SEED_DEMO:
-            conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
-    yield
-    pool.close()
+    try:
+        with pool.connection() as conn:
+            ran = migrate(conn)
+            if ran:
+                print("applied migrations:", ", ".join(ran), flush=True)
+            if SEED_DEMO:
+                conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
+        yield
+    finally:
+        pool.close()  # also when a migration fails, so the process exits cleanly
 
 
 app = FastAPI(title="Barcode chatbot BE", lifespan=lifespan)
@@ -123,12 +151,49 @@ def verify_order(order_id: str, body: Scans):
     }
 
 
+def check_migrations():
+    """migrate() on a scratch schema: runs in order, skips applied files, a failing file rolls back the whole run."""
+    import tempfile
+
+    pool.open(wait=True, timeout=30)
+    with tempfile.TemporaryDirectory() as d, pool.connection() as conn:
+        d = Path(d)
+        conn.execute("DROP SCHEMA IF EXISTS migrate_check CASCADE")
+        conn.execute("CREATE SCHEMA migrate_check")
+        conn.execute("SET search_path TO migrate_check")
+        conn.commit()
+        try:
+            (d / "001_a.sql").write_text("CREATE TABLE t (id int)", encoding="utf-8")
+            (d / "002_b.sql").write_text("ALTER TABLE t ADD COLUMN v text", encoding="utf-8")
+            assert migrate(conn, d) == ["001_a.sql", "002_b.sql"]
+            assert migrate(conn, d) == []  # already applied: nothing runs twice
+            (d / "003_c.sql").write_text("ALTER TABLE t ADD COLUMN w int", encoding="utf-8")
+            (d / "004_bad.sql").write_text("ALTER TABLE nope ADD COLUMN x int", encoding="utf-8")
+            try:
+                migrate(conn, d)
+                raise AssertionError("a failing migration must raise")
+            except Exception as e:
+                assert "nope" in str(e), e
+            cols = [r["column_name"] for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'migrate_check'"
+                " AND table_name = 't' ORDER BY ordinal_position")]
+            assert cols == ["id", "v"], cols  # 003 rolled back together with 004
+            assert [r["name"] for r in conn.execute("SELECT name FROM schema_migrations ORDER BY name")] == \
+                ["001_a.sql", "002_b.sql"]
+        finally:
+            conn.rollback()
+            conn.execute("RESET search_path")
+            conn.execute("DROP SCHEMA migrate_check CASCADE")
+            conn.commit()
+
+
 def check():
     """Self-check through the HTTP API against DATABASE_URL, using the demo data (SEED_DEMO=true)."""
     from fastapi.testclient import TestClient
 
     assert compare({"A": 2, "B": 1}, {"A": 1, "C": 1}) == ({"A": 1, "B": 1}, {"C": 1})
     assert compare({"A": 1}, {"A": 3}) == ({}, {"A": 2})
+    check_migrations()
     with TestClient(app) as c:
         assert c.get("/health").json() == {"status": "ok"}
         p = c.get("/products/8935000100011").json()
