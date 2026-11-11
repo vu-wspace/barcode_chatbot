@@ -12,11 +12,15 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 
-# Kết quả chạy eval (mỗi lần chạy 1 file JSON)
-evals/results/
+graphify-out/
+.playwright-mcp/
+
 
 # Secrets
 .env
 
 # CA nội bộ cho mạng có SSL inspection (xem README)
-certs/*.crt
+**/certs/*.crt
+
+# Trang HTML đã tải khi cào dữ liệu (data_schema/scrape_phone.py)
+data_schema/.cache/

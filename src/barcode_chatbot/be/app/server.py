@@ -1,0 +1,157 @@
+"""Backend: products and orders in PostgreSQL, used by the scanner page and by the AI agent's tools.
+
+    uv run uvicorn app.server:app --host 0.0.0.0 --port 8000
+    uv run python -m app.server check   # self-check against DATABASE_URL (needs the demo data: SEED_DEMO=true)
+
+Needs DATABASE_URL, e.g. postgresql://postgres:<password>@localhost:5432/barcode_chatbot
+"""
+import os
+import sys
+from collections import Counter
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Annotated
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Query
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
+from pydantic import BaseModel, Field
+
+load_dotenv()
+HERE = Path(__file__).parent
+SEED_DEMO = os.getenv("SEED_DEMO", "false").lower() == "true"
+
+Code = Annotated[str, Field(min_length=1, max_length=64)]
+
+PRODUCT_COLS = "sku, barcode, name, category, price, stock"
+
+pool = ConnectionPool(os.getenv("DATABASE_URL", ""), open=False, min_size=1, max_size=10,
+                      kwargs={"row_factory": dict_row})
+
+
+@asynccontextmanager
+async def lifespan(_):
+    if not os.getenv("DATABASE_URL"):
+        raise RuntimeError("DATABASE_URL is not set (add it to .env)")
+    pool.open(wait=True, timeout=30)
+    with pool.connection() as conn:
+        conn.execute((HERE / "schema.sql").read_text(encoding="utf-8"))
+        if SEED_DEMO:
+            conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
+    yield
+    pool.close()
+
+
+app = FastAPI(title="Barcode chatbot BE", lifespan=lifespan)
+
+
+@app.get("/health")
+def health():
+    with pool.connection() as conn:
+        conn.execute("SELECT 1")
+    return {"status": "ok"}
+
+
+@app.get("/products")
+def search_products(q: str = Query("", max_length=100), limit: int = Query(20, ge=1, le=100)):
+    """Search by name, SKU, barcode or category (case-insensitive substring). Empty q lists everything."""
+    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    with pool.connection() as conn:
+        return conn.execute(
+            f"SELECT {PRODUCT_COLS} FROM products WHERE name ILIKE %(l)s OR sku ILIKE %(l)s OR barcode LIKE %(l)s"
+            " OR category ILIKE %(l)s ORDER BY sku LIMIT %(n)s", {"l": like, "n": limit}).fetchall()
+
+
+@app.get("/products/{code}")
+def get_product(code: str):
+    """One product by barcode or SKU."""
+    with pool.connection() as conn:
+        row = conn.execute(f"SELECT {PRODUCT_COLS} FROM products WHERE barcode = %(c)s OR sku = %(c)s",
+                           {"c": code}).fetchone()
+    if row is None:
+        raise HTTPException(404, "unknown product")
+    return row
+
+
+def load_order(conn, order_id):
+    order = conn.execute("SELECT order_id, customer, status, created_at FROM orders WHERE order_id = %s",
+                         (order_id,)).fetchone()
+    if order is None:
+        raise HTTPException(404, "unknown order")
+    order["items"] = conn.execute(
+        "SELECT p.sku, p.barcode, p.name, i.quantity FROM order_items i JOIN products p USING (sku)"
+        " WHERE i.order_id = %s ORDER BY p.sku", (order_id,)).fetchall()
+    return order
+
+
+@app.get("/orders/{order_id}")
+def get_order(order_id: str):
+    with pool.connection() as conn:
+        return load_order(conn, order_id)
+
+
+class Scans(BaseModel):
+    barcodes: list[Code] = Field(max_length=500)  # one entry per scanned unit; a barcode may repeat
+
+
+def compare(expected: dict[str, int], scanned: dict[str, int]):
+    """Expected vs scanned counts per SKU -> (missing, extra). Extra = over the quantity or not in the order."""
+    missing = {s: q - scanned.get(s, 0) for s, q in expected.items() if scanned.get(s, 0) < q}
+    extra = {s: n - expected.get(s, 0) for s, n in scanned.items() if n > expected.get(s, 0)}
+    return missing, extra
+
+
+@app.post("/orders/{order_id}/verify")
+def verify_order(order_id: str, body: Scans):
+    """Compare the scanned barcodes (or SKUs) against the order. Read-only: nothing is stored."""
+    with pool.connection() as conn:
+        order = load_order(conn, order_id)
+        rows = conn.execute("SELECT sku, barcode FROM products WHERE barcode = ANY(%(c)s) OR sku = ANY(%(c)s)",
+                            {"c": list(set(body.barcodes))}).fetchall()
+    to_sku = {r["barcode"]: r["sku"] for r in rows} | {r["sku"]: r["sku"] for r in rows}
+    scanned = Counter(to_sku[c] for c in body.barcodes if c in to_sku)
+    expected = {i["sku"]: i["quantity"] for i in order["items"]}
+    missing, extra = compare(expected, scanned)
+    return {
+        "order_id": order_id,
+        "items": [{**i, "scanned": scanned.get(i["sku"], 0)} for i in order["items"]],
+        "missing": missing,
+        "extra": extra,
+        "unknown": sorted({c for c in body.barcodes if c not in to_sku}),
+        "complete": not missing and not extra and all(c in to_sku for c in body.barcodes),
+    }
+
+
+def check():
+    """Self-check through the HTTP API against DATABASE_URL, using the demo data (SEED_DEMO=true)."""
+    from fastapi.testclient import TestClient
+
+    assert compare({"A": 2, "B": 1}, {"A": 1, "C": 1}) == ({"A": 1, "B": 1}, {"C": 1})
+    assert compare({"A": 1}, {"A": 3}) == ({}, {"A": 2})
+    with TestClient(app) as c:
+        assert c.get("/health").json() == {"status": "ok"}
+        p = c.get("/products/8935000100011").json()
+        assert p["sku"] == "HD-1001" and c.get("/products/HD-1001").json() == p, p
+        assert c.get("/products/0000000000000").status_code == 404
+        assert [r["sku"] for r in c.get("/products", params={"q": "cáp"}).json()] == ["CB-3001"]
+        assert c.get("/products", params={"q": "%"}).json() == []  # LIKE wildcards are matched literally
+        assert len(c.get("/orders/SO-104587").json()["items"]) == 3
+        assert c.get("/orders/NOPE").status_code == 404
+
+        v = c.post("/orders/SO-104587/verify", json={"barcodes": ["8935000100011", "CH-2001", "8935000300015"]}).json()
+        assert v["complete"] and v["missing"] == {} and all(i["scanned"] == 1 for i in v["items"]), v
+        v = c.post("/orders/SO-104587/verify", json={"barcodes": ["8935000100011", "8935000100011", "8935000400012",
+                                                                  "123"]}).json()
+        assert not v["complete"], v
+        assert v["missing"] == {"CH-2001": 1, "CB-3001": 1} and v["extra"] == {"HD-1001": 1, "MS-4001": 1}, v
+        assert v["unknown"] == ["123"], v
+        assert c.post("/orders/NOPE/verify", json={"barcodes": []}).status_code == 404
+    print("ok")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["check"]:
+        check()
+    else:
+        print(__doc__)

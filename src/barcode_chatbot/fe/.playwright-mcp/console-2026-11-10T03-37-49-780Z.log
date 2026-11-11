@@ -1,4 +1,0 @@
-[    5857ms] [WARNING] The keyword 'slider-vertical' specified to an 'appearance' property is not standardized. It will be removed in the future. Use <input type=range style="writing-mode: vertical-lr; direction: rtl"> instead. @ :3642
-[    5858ms] [WARNING] The keyword 'slider-vertical' specified to an 'appearance' property is not standardized. It will be removed in the future. Use <input type=range style="writing-mode: vertical-lr; direction: rtl"> instead. @ :3642
-[   22820ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_TIMED_OUT @ https://connect.facebook.net/en_US/fbevents.js:1
-[   22840ms] [INFO] Banner not shown: beforeinstallpromptevent.preventDefault() called. The page must call beforeinstallpromptevent.prompt() to show the banner. @ https://www.barcodestalk.com/free-online-barcode-scanner:1

@@ -1,0 +1,21 @@
+# Gate: one origin for the page, the BE (/api/) and the AI agent (/ai/).
+server {
+    listen 80;
+    root /usr/share/nginx/html;
+
+    # Upstreams in variables + Docker DNS: resolved per request, so the gate starts even when be/ai are still down
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location /api/ {
+        set $be ${BE_URL};
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $be;
+    }
+
+    location /ai/ {
+        set $ai ${AI_URL};
+        rewrite ^/ai/(.*)$ /$1 break;
+        proxy_pass $ai;
+        proxy_read_timeout 180s;  # LLM + tool calls + model fallback can take a while
+    }
+}

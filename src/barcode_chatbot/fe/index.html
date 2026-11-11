@@ -42,6 +42,18 @@
   ul.hist li button { padding:4px 8px; }
   #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#222; color:#fff; padding:10px 16px; border-radius:8px; opacity:0; transition:opacity .2s; pointer-events:none; max-width:calc(100% - 32px); }
   #toast.show { opacity:1; } #toast.err { background:var(--err); }
+  .prod { margin-top:10px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; }
+  .prod.none { color:var(--err); }
+  ul.items { list-style:none; padding:0; margin:10px 0 0; }
+  ul.items li { display:flex; gap:8px; padding:6px 0; border-top:1px solid var(--line); }
+  ul.items li .n { margin-left:auto; font-family:ui-monospace, monospace; }
+  ul.items li.done .n { color:var(--accent); font-weight:600; }
+  ul.items li.over .n { color:var(--err); font-weight:600; }
+  .chat { display:flex; flex-direction:column; max-height:380px; overflow-y:auto; margin-top:8px; }
+  .msg { padding:8px 12px; border-radius:10px; margin:4px 0; white-space:pre-wrap; max-width:90%; word-break:break-word; }
+  .msg.me { background:var(--accent); color:#fff; align-self:flex-end; }
+  .msg.ai { background:var(--bg); border:1px solid var(--line); align-self:flex-start; }
+  .msg.err { border-color:var(--err); color:var(--err); }
 </style>
 </head>
 <body>
@@ -86,7 +98,26 @@
     </div>
   </section>
 
+  <section class="card">
+    <strong>Đơn hàng đang đóng gói</strong>
+    <form class="row" id="orderForm">
+      <input type="text" id="orderId" placeholder="Mã đơn, vd SO-104587" aria-label="Mã đơn hàng">
+      <button class="primary">Tải đơn</button>
+      <button type="button" id="orderReset" hidden>Quét lại từ đầu</button>
+    </form>
+    <div id="order" hidden></div>
+  </section>
+
   <section class="card result" id="result" hidden></section>
+
+  <section class="card">
+    <strong>Trợ lý AI</strong>
+    <div class="chat" id="chat" aria-live="polite"></div>
+    <form class="row" id="chatForm">
+      <input type="text" id="chatInput" placeholder="Hỏi về sản phẩm, đơn hàng…" aria-label="Tin nhắn cho trợ lý" maxlength="1000">
+      <button class="primary">Gửi</button>
+    </form>
+  </section>
 
   <section class="card">
     <div class="row" style="margin:0;justify-content:space-between">
@@ -115,7 +146,7 @@
   };
   var NAMES = { qr_code:'QR Code', aztec:'Aztec', codabar:'Codabar', code_39:'Code 39', code_93:'Code 93', code_128:'Code 128', data_matrix:'Data Matrix', ean_8:'EAN-8', ean_13:'EAN-13', itf:'ITF', pdf417:'PDF417', upc_a:'UPC-A', upc_e:'UPC-E', asin:'ASIN', unknown:'Unknown' };
   var $ = function (id) { return document.getElementById(id); };
-  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null };
+  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: null };
   var agree = ScanCore.createAgreement(CFG.requiredAgreement, CFG.agreeWindowMs);
 
   // --- storage (localStorage can throw in private mode) ---
@@ -290,10 +321,73 @@
     save(CFG.historyKey, S.history);
     renderResult(S.history[0]); renderHistory();
     toast('Scanned: ' + value); beep(); if (navigator.vibrate) navigator.vibrate(80);
+    if (S.order) {
+      S.scans.push(value); renderOrder();
+      askAI('Đơn ' + S.order.order_id + '. Các mã đã quét (' + S.scans.length + ' lần quét): ' + S.scans.join(', ') +
+        '. Vừa quét: ' + value + '. Kiểm tra giúp.');
+    } else askAI('Vừa quét mã ' + value + '. Đây là sản phẩm gì?');
+  }
+
+  // --- BE (via the gate at /api/) ---
+  function getJson(url, opts) {
+    return fetch(url, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (b) { if (!r.ok) { var e = new Error(typeof b.detail === 'string' ? b.detail : 'HTTP ' + r.status); e.status = r.status; throw e; } return b; });
+    });
+  }
+  var VND = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' });
+
+  function lookupProduct(code) {
+    var el = $('product'); el.className = 'prod muted'; el.textContent = 'Đang tra kho…';
+    getJson('/api/products/' + encodeURIComponent(code)).then(function (p) {
+      if (el !== $('product') || el.dataset.code !== code) return; // a newer result replaced this card
+      el.className = 'prod';
+      el.innerHTML = '<strong>' + esc(p.name) + '</strong><dl><dt>SKU</dt><dd>' + esc(p.sku) + '</dd><dt>Danh mục</dt><dd>' + esc(p.category) +
+        '</dd><dt>Giá</dt><dd>' + esc(VND.format(p.price)) + '</dd><dt>Tồn kho</dt><dd>' + (p.stock > 0 ? esc(p.stock) : 'Hết hàng') + '</dd></dl>';
+    }).catch(function (e) {
+      if (el !== $('product') || el.dataset.code !== code) return;
+      el.className = 'prod none'; el.textContent = e.status === 404 ? 'Không có trong kho' : 'Không tra được kho (' + e.message + ')';
+    });
+  }
+
+  // --- order checklist ---
+  function loadOrder(id) {
+    getJson('/api/orders/' + encodeURIComponent(id)).then(function (o) {
+      S.order = o; S.scans = []; $('orderReset').hidden = false; renderOrder();
+    }).catch(function (e) { toast(e.status === 404 ? 'Không có đơn ' + id : 'Không tải được đơn (' + e.message + ')', true); });
+  }
+
+  function renderOrder() {
+    var o = S.order, el = $('order'), matched = 0;
+    var rows = o.items.map(function (i) {
+      var n = S.scans.filter(function (c) { return c === i.barcode || c === i.sku; }).length; matched += n;
+      return '<li class="' + (n === i.quantity ? 'done' : n > i.quantity ? 'over' : '') + '"><span>' + esc(i.sku) + ' – ' + esc(i.name) +
+        '</span><span class="n">' + n + '/' + i.quantity + (n === i.quantity ? ' ✓' : '') + '</span></li>';
+    });
+    var other = S.scans.length - matched, need = o.items.reduce(function (s, i) { return s + i.quantity; }, 0);
+    if (other) rows.push('<li class="over"><span>Mã không thuộc đơn</span><span class="n">' + other + '</span></li>');
+    el.innerHTML = '<p class="muted" style="margin:8px 0 0">' + esc(o.order_id) + (o.customer ? ' · ' + esc(o.customer) : '') +
+      ' · đã quét ' + S.scans.length + ', cần ' + need + '</p><ul class="items">' + rows.join('') + '</ul>';
+    el.hidden = false;
+  }
+
+  // --- AI agent (via the gate at /ai/); queued so turns of one thread never run concurrently ---
+  var aiQueue = Promise.resolve();
+  function bubble(text, cls) {
+    var d = document.createElement('div'); d.className = 'msg ' + cls; d.textContent = text;
+    $('chat').appendChild(d); $('chat').scrollTop = $('chat').scrollHeight; return d;
+  }
+  function askAI(text) {
+    bubble(text, 'me'); var reply = bubble('…', 'ai');
+    aiQueue = aiQueue.then(function () {
+      return getJson('/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, thread_id: S.thread }) })
+        .then(function (r) { S.thread = r.thread_id; reply.textContent = r.answer; })
+        .catch(function (e) { reply.classList.add('err'); reply.textContent = 'Trợ lý lỗi: ' + e.message; })
+        .then(function () { $('chat').scrollTop = $('chat').scrollHeight; });
+    });
   }
 
   function renderResult(e) {
-    var box = $('result'), q = encodeURIComponent(e.value), html = '<span class="tag">' + esc(NAMES[e.format] || e.format) + '</span> <span class="muted">' + esc(e.source) + ' · ' + new Date(e.ts).toLocaleString() + '</span><div class="val" style="margin-top:6px">' + esc(e.value) + '</div>';
+    var box = $('result'), q = encodeURIComponent(e.value), html = '<span class="tag">' + esc(NAMES[e.format] || e.format) + '</span> <span class="muted">' + esc(e.source) + ' · ' + new Date(e.ts).toLocaleString() + '</span><div class="val" style="margin-top:6px">' + esc(e.value) + '</div><div class="prod" id="product" data-code="' + esc(e.value) + '"></div>';
     var retail = /^\d{8,14}$/.test(e.value);
     if (retail || e.format === 'asin') {
       html += '<div class="row">' + [
@@ -308,6 +402,7 @@
     }
     html += '<div class="row"><button data-copy="' + esc(e.value) + '">Copy</button></div>';
     box.innerHTML = html; box.hidden = false;
+    lookupProduct(e.value);
   }
 
   function renderHistory() {
@@ -355,6 +450,9 @@
     else renderResult(S.history[+t.dataset.show]);
   });
   $('csvBtn').onclick = exportCsv;
+  $('orderForm').onsubmit = function (e) { e.preventDefault(); var id = $('orderId').value.trim().toUpperCase(); if (id) loadOrder(id); };
+  $('orderReset').onclick = function () { S.scans = []; renderOrder(); };
+  $('chatForm').onsubmit = function (e) { e.preventDefault(); var t = $('chatInput').value.trim(); if (t) { askAI(t); $('chatInput').value = ''; } };
   $('copyAllBtn').onclick = function () { if (S.history.length) copy(S.history.map(function (e) { return e.value; }).join('\n')); };
   $('clearBtn').onclick = function () { if (S.history.length && confirm('Clear all scan history?')) { S.history = []; save(CFG.historyKey, []); renderHistory(); $('result').hidden = true; } };
   // Release the camera when the tab is hidden; Safari otherwise keeps the camera light on.

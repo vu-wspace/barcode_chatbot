@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from bank_faqs import api
+from packing_agent import api
 
 
 class FakeAgent:
@@ -28,7 +28,7 @@ class FakeAgent:
         call_id = f'call-{len(history)}'
         history += [
             HumanMessage(text),
-            AIMessage('', tool_calls=[{'name': 'get_interest_rate', 'args': {}, 'id': call_id}]),
+            AIMessage('', tool_calls=[{'name': 'get_product', 'args': {}, 'id': call_id}]),
             ToolMessage('...', tool_call_id=call_id),
             AIMessage(f'Trả lời: {text}'),
         ]
@@ -37,25 +37,18 @@ class FakeAgent:
 
 @pytest.fixture
 def client():
-    # Không dùng `with TestClient(...)` để bỏ qua lifespan (không cần Qdrant/model thật)
+    # Không dùng `with TestClient(...)` để bỏ qua lifespan (không cần model thật)
     api.app.state.agent = FakeAgent()
     return TestClient(api.app)
 
 
-def test_index_serves_chat_page(client):
-    r = client.get('/')
-    assert r.status_code == 200
-    assert 'text/html' in r.headers['content-type']
-    assert 'Trợ lý chăm sóc khách hàng' in r.text
-
-
 def test_chat_new_thread(client):
-    r = client.post('/chat', json={'message': 'lãi suất BIDV'})
+    r = client.post('/chat', json={'message': 'mã 8935000100011'})
     assert r.status_code == 200
     data = r.json()
     uuid.UUID(data['thread_id'])
-    assert data['answer'] == 'Trả lời: lãi suất BIDV'
-    assert data['tools'] == ['get_interest_rate']
+    assert data['answer'] == 'Trả lời: mã 8935000100011'
+    assert data['tools'] == ['get_product']
 
 
 def test_chat_same_thread_only_reports_tools_of_current_turn(client):
@@ -64,11 +57,11 @@ def test_chat_same_thread_only_reports_tools_of_current_turn(client):
     data = r.json()
     assert data['thread_id'] == tid
     assert data['answer'] == 'Trả lời: câu 2'
-    assert data['tools'] == ['get_interest_rate']  # không lặp lại tool của lượt trước
+    assert data['tools'] == ['get_product']  # không lặp lại tool của lượt trước
     assert len(api.app.state.agent.threads[tid]) == 8
 
 
-@pytest.mark.parametrize('body', [{'message': ''}, {'message': 'x' * 1001}, {}, {'message': 'hi', 'thread_id': 'x' * 101}])
+@pytest.mark.parametrize('body', [{'message': ''}, {'message': 'x' * 4001}, {}, {'message': 'hi', 'thread_id': 'x' * 101}])
 def test_chat_validation(client, body):
     assert client.post('/chat', json=body).status_code == 422
 
@@ -130,37 +123,5 @@ def test_chat_upstream_error_returns_502(client):
     assert r.status_code == 502
 
 
-def test_health_ok(client, monkeypatch):
-    monkeypatch.setattr(api, 'count_documents', lambda: 34)
-    assert client.get('/health').json() == {'status': 'ok', 'documents': 34}
-
-
-def test_health_qdrant_down(client, monkeypatch):
-    def boom():
-        raise ConnectionError()
-    monkeypatch.setattr(api, 'count_documents', boom)
-    assert client.get('/health').status_code == 503
-
-
-def test_qdrant_client_is_reused():
-    # /health được gọi mỗi 30s: tạo client mới mỗi lần sẽ tích tụ kết nối
-    from bank_faqs.vector_db import get_client
-    assert get_client() is get_client()
-
-
-def test_prepare_vector_db_ingests_when_empty(monkeypatch):
-    monkeypatch.setattr(api, 'get_vector_store', lambda: 'db')
-    monkeypatch.setattr(api, 'count_documents', lambda: 0)
-    monkeypatch.setattr(api, 'ingest', lambda db: 34)
-    assert api.prepare_vector_db() == 34
-
-
-def test_prepare_vector_db_retries_then_raises(monkeypatch):
-    calls = []
-    def boom():
-        calls.append(1)
-        raise ConnectionError()
-    monkeypatch.setattr(api, 'get_vector_store', boom)
-    with pytest.raises(ConnectionError):
-        api.prepare_vector_db(retries=3, delay=0)
-    assert len(calls) == 3
+def test_health(client):
+    assert client.get('/health').json() == {'status': 'ok'}

@@ -2,7 +2,7 @@ import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
-from bank_faqs import agent as agent_module
+from packing_agent import agent as agent_module
 
 
 class FakeModel(GenericFakeChatModel):

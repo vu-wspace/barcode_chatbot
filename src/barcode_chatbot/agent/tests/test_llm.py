@@ -1,4 +1,4 @@
-from bank_faqs.llm import google_llm, groq_llm, open_llm
+from packing_agent.llm import google_llm, groq_llm, open_llm
 
 
 def test_openrouter_timeout_is_in_milliseconds():

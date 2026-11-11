@@ -1,27 +1,55 @@
+# FE scan -> gate (nginx) -> /api/ -> be -> db (products, orders)
+#                         -> /ai/  -> ai (agent) -> tools call be's API -> db
+#   docker compose up -d --build
+# Open http://localhost:${GATE_PORT:-8080}
+
 services:
-  qdrant:
-    image: qdrant/qdrant:v1.20.0   # ghim phiên bản, khớp qdrant-client trong pyproject.toml
-    container_name: qdrant
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: barcode_chatbot
     ports:
-      - "6333:6333"   # REST API + dashboard (cũng dùng khi chạy code trên máy, không Docker)
-      - "6334:6334"   # gRPC
+      - "127.0.0.1:5433:5432"  # local runs / DB tools: DATABASE_URL=...@localhost:5433/barcode_chatbot (localhost only)
     volumes:
-      - qdrant_data:/qdrant/storage   # Docker volume: dữ liệu còn khi xóa container, mất khi `down -v`
+      - pgdata:/var/lib/postgresql  # postgres 18 keeps its data under this directory
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "barcode_chatbot"]
+      interval: 5s
+      retries: 10
     restart: unless-stopped
 
-  api:
-    build: .
-    image: bank-faqs-api
-    container_name: bank_faqs_api
-    ports:
-      - "8000:8000"   # Web chat + API (docs tại /docs)
-    env_file: .env    # OPENROUTER_API_KEY, GOOGLE_API_KEY, GROQ_API_KEY, TAVILY_API_KEY, LANGSMITH_*
+  be:
+    build: src/barcode_chatbot/be
     environment:
-      QDRANT_URL: http://qdrant:6333   # ghi đè QDRANT_URL=localhost trong .env
-      AUTO_INGEST: "true"              # collection rỗng thì tự nạp dữ liệu khi khởi động
+      # a password with @ : / ? # % must be URL-encoded here
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/barcode_chatbot
+      SEED_DEMO: ${SEED_DEMO:-true}  # demo products + orders SO-104587, SO-104588 (never overwrites edited rows)
     depends_on:
-      - qdrant
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ai:
+    build: src/barcode_chatbot/agent
+    env_file: .env  # OPENROUTER_API_KEY, GOOGLE_API_KEY, GROQ_API_KEY, LANGSMITH_*
+    environment:
+      BE_URL: http://be:8000
+    depends_on:
+      - be
+    restart: unless-stopped
+
+  gate:
+    build: src/barcode_chatbot/fe
+    ports:
+      - "${GATE_PORT:-8080}:80"
+    environment:
+      BE_URL: http://be:8000
+      AI_URL: http://ai:8000
+    depends_on:
+      - be
+      - ai
     restart: unless-stopped
 
 volumes:
-  qdrant_data:
+  pgdata:
