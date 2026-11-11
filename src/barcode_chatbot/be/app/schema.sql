@@ -16,6 +16,13 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Trigram indexes: GET /products?q= searches '%text%', which a btree index cannot serve
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS products_name_trgm ON products USING gin (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS products_sku_trgm ON products USING gin (sku gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS products_barcode_trgm ON products USING gin (barcode gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS products_category_trgm ON products USING gin (category gin_trgm_ops);
+
 -- Expected content of an order's box: what the packer must scan.
 CREATE TABLE IF NOT EXISTS order_items (
     order_id text NOT NULL REFERENCES orders ON DELETE CASCADE,

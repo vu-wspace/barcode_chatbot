@@ -65,10 +65,10 @@ def search_products(q: str = Query("", max_length=100), limit: int = Query(20, g
 
 @app.get("/products/{code}")
 def get_product(code: str):
-    """One product by barcode or SKU."""
+    """One product by barcode or SKU. A code that is one product's barcode and another's SKU means the barcode."""
     with pool.connection() as conn:
-        row = conn.execute(f"SELECT {PRODUCT_COLS} FROM products WHERE barcode = %(c)s OR sku = %(c)s",
-                           {"c": code}).fetchone()
+        row = conn.execute(f"SELECT {PRODUCT_COLS} FROM products WHERE barcode = %(c)s OR sku = %(c)s"
+                           " ORDER BY barcode = %(c)s DESC LIMIT 1", {"c": code}).fetchone()
     if row is None:
         raise HTTPException(404, "unknown product")
     return row
@@ -109,7 +109,7 @@ def verify_order(order_id: str, body: Scans):
         order = load_order(conn, order_id)
         rows = conn.execute("SELECT sku, barcode FROM products WHERE barcode = ANY(%(c)s) OR sku = ANY(%(c)s)",
                             {"c": list(set(body.barcodes))}).fetchall()
-    to_sku = {r["barcode"]: r["sku"] for r in rows} | {r["sku"]: r["sku"] for r in rows}
+    to_sku = {r["sku"]: r["sku"] for r in rows} | {r["barcode"]: r["sku"] for r in rows}  # barcode wins, as in get_product
     scanned = Counter(to_sku[c] for c in body.barcodes if c in to_sku)
     expected = {i["sku"]: i["quantity"] for i in order["items"]}
     missing, extra = compare(expected, scanned)
@@ -147,6 +147,17 @@ def check():
         assert v["missing"] == {"CH-2001": 1, "CB-3001": 1} and v["extra"] == {"HD-1001": 1, "MS-4001": 1}, v
         assert v["unknown"] == ["123"], v
         assert c.post("/orders/NOPE/verify", json={"barcodes": []}).status_code == 404
+
+        # a code that is one product's barcode and another product's SKU resolves to the barcode
+        with pool.connection() as conn:
+            conn.execute("INSERT INTO products (sku, barcode, name) VALUES ('8935000100011', 'CHECK-COLLIDE', 'x')")
+        try:
+            assert c.get("/products/8935000100011").json()["sku"] == "HD-1001"
+            v = c.post("/orders/SO-104587/verify", json={"barcodes": ["8935000100011"]}).json()
+            assert v["items"][2]["sku"] == "HD-1001" and v["items"][2]["scanned"] == 1, v
+        finally:
+            with pool.connection() as conn:
+                conn.execute("DELETE FROM products WHERE barcode = 'CHECK-COLLIDE'")
     print("ok")
 
 

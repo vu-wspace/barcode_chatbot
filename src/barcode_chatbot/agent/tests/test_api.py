@@ -123,5 +123,33 @@ def test_chat_upstream_error_returns_502(client):
     assert r.status_code == 502
 
 
+def test_thread_id_must_be_uuid(client):
+    # thread_id kiểu '1', 'abc' dễ đoán -> đọc được hội thoại của người khác
+    assert client.post('/chat', json={'message': 'hi', 'thread_id': '1'}).status_code == 422
+
+
+def test_same_thread_turns_run_one_at_a_time(client):
+    import threading
+    import time
+    running, overlap = [0], []
+
+    class SlowAgent(FakeAgent):
+        def invoke(self, input, config):
+            running[0] += 1
+            overlap.append(running[0])
+            time.sleep(0.2)
+            running[0] -= 1
+            return super().invoke(input, config)
+
+    api.app.state.agent = SlowAgent()
+    tid = str(uuid.uuid4())
+    ts = [threading.Thread(target=client.post, args=('/chat',), kwargs={'json': {'message': f'm{i}', 'thread_id': tid}})
+          for i in range(3)]
+    for t in ts: t.start()
+    for t in ts: t.join()
+    assert max(overlap) == 1  # không có 2 lượt nào chạy cùng lúc trên 1 thread
+    assert len(api.app.state.agent.threads[tid]) == 12  # 3 lượt x 4 message, không mất lượt nào
+
+
 def test_health(client):
     assert client.get('/health').json() == {'status': 'ok'}
