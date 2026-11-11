@@ -7,12 +7,15 @@ INSERT INTO products (sku, barcode, name, category, price, stock) VALUES
     ('CB-3001', '8935000300015', 'Cáp USB-C 1m', 'Phụ kiện', 90000, 120),
     ('MS-4001', '8935000400012', 'Chuột không dây', 'Máy tính', 320000, 40),
     ('KB-5001', '8935000500019', 'Bàn phím cơ', 'Máy tính', 1150000, 0),
-    ('SALONPAS', '8935106211321', 'Miếng dán Salonpas', 'Y tế', 35000, 200)
+    ('SALONPAS', '8935106211321', 'Miếng dán Salonpas', 'Y tế', 35000, 200),
+    ('CLASSMATE-NB', '8936212227992', 'Vở ClassMate', 'Văn phòng phẩm', 15000, 150)
 ON CONFLICT DO NOTHING;
 
 INSERT INTO orders (order_id, customer) VALUES
     ('SO-104587', 'Nguyễn Văn A'),
-    ('SO-104588', 'Trần Thị B')
+    ('SO-104588', 'Trần Thị B'),
+    -- box X55277605433 from the old barcode_cv system (mock_checklist.json / its boxes + checklist_items tables)
+    ('X55277605433', '')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO order_items (order_id, sku, quantity) VALUES
@@ -20,5 +23,7 @@ INSERT INTO order_items (order_id, sku, quantity) VALUES
     ('SO-104587', 'CH-2001', 1),
     ('SO-104587', 'CB-3001', 1),
     ('SO-104588', 'MS-4001', 2),
-    ('SO-104588', 'SALONPAS', 3)
+    ('SO-104588', 'SALONPAS', 3),
+    ('X55277605433', 'SALONPAS', 1),
+    ('X55277605433', 'CLASSMATE-NB', 3)
 ON CONFLICT DO NOTHING;

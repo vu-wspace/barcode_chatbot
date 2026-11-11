@@ -64,11 +64,11 @@ flowchart LR
 
 | Service | Công nghệ | Vai trò |
 |---|---|---|
-| `gate` | nginx 1.27 | Phục vụ trang quét mã; chuyển `/api/` tới `be` và `/ai/` tới `ai`; rate limit, CSP, chặn Host lạ |
+| `gate` | nginx 1.28 | Phục vụ trang quét mã; chuyển `/api/` tới `be` và `/ai/` tới `ai`; rate limit, CSP, chặn Host lạ |
 | `be` | Python 3.13, FastAPI, psycopg 3 | Sản phẩm, đơn hàng, đối chiếu đơn. Quyết định niêm phong |
 | `ai` | LangChain `create_agent`, LangGraph, AsyncPostgresSaver | Chat SSE, tool gọi BE, lưu lịch sử |
 | `migrate` | (image của `be`) | Chạy migration, nạp dữ liệu mẫu, tạo role `be_app` / `ai_app`, rồi thoát |
-| `db` | Postgres 18 | Dữ liệu kho (schema `public`) và lịch sử chat (schema `agent`) |
+| `db` | Postgres 18.6 | Dữ liệu kho (schema `public`) và lịch sử chat (schema `agent`) |
 
 ## Luồng xử lý
 
@@ -296,7 +296,7 @@ flowchart LR
 
 | Việc | Lệnh |
 |---|---|
-| Xem trạng thái | `docker compose ps -a` |
+| Xem trạng thái | `docker compose ps -a` (be, ai, gate có healthcheck; `gate` chỉ khởi động khi be và ai healthy) |
 | Xem log | `docker compose logs -f ai` (hoặc `be`, `gate`, `migrate`) |
 | Deploy bản mới | `docker compose up -d --build` |
 | Gắn tag image trước khi deploy | `docker tag barcode_chatbot-ai:latest barcode_chatbot-ai:prev` (tương tự cho `be`, `gate`) |

@@ -1,16 +1,25 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Barcode Scanner</title>
+<title>Kiểm tra đóng gói</title>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --muted:#667; --line:#dde1e6; --accent:#367018; --accent-fg:#367018; --err:#b42d2d; --err-fg:#b42d2d; --warn-fg:#946600; }
   @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --card:#1d2126; --fg:#e8ebee; --muted:#9aa3ad; --line:#2e343b; --accent-fg:#8fd16a; --err-fg:#ff7b7b; --warn-fg:#e0a800; } }
   [hidden] { display:none !important; } /* display:flex rules below would otherwise override the hidden attribute */
   * { box-sizing: border-box; }
   body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
-  main { max-width:720px; margin:0 auto; padding:16px; }
+  main { max-width:1280px; margin:0 auto; padding:16px; }
+  /* 2x2: Camera scanner | AI Chat / Đơn | History. One column on narrow screens, in that order. */
+  .grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:16px; align-items:stretch; }
+  /* phone: the order verdict right under the scanner, chat and history after it */
+  @media (max-width: 900px) { .grid { grid-template-columns:minmax(0, 1fr); } #pOrder { order:1; } #pChat { order:2; } #pHist { order:3; } }
+  .panel { margin:0; display:flex; flex-direction:column; min-width:0; }
+  .panel h2 { font-size:1.05rem; margin:0 0 12px; }
+  /* chat log and history fill their cell and scroll; contain:size keeps them from stretching the row */
+  .panel .chat, .panel .scroll { flex:1 1 0; min-height:260px; overflow-y:auto; contain:size; }
+  .result { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
   h1 { font-size:1.4rem; margin:.2em 0 .6em; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
   .tabs { display:flex; gap:8px; margin-bottom:12px; }
@@ -56,7 +65,7 @@
   .verdict { margin-top:10px; padding:10px 12px; border-radius:8px; font-weight:600; white-space:pre-line; }
   .verdict.ok { background:var(--accent); color:#fff; } .verdict.ng { background:var(--err); color:#fff; }
   .verdict.wait { border:1px solid var(--line); color:var(--muted); font-weight:400; }
-  .chat { display:flex; flex-direction:column; max-height:380px; overflow-y:auto; margin-top:8px; }
+  .chat { display:flex; flex-direction:column; margin-top:0; }
   .msg { padding:8px 12px; border-radius:10px; margin:4px 0; white-space:pre-wrap; max-width:90%; word-break:break-word; }
   .msg.me { background:var(--accent); color:#fff; align-self:flex-end; }
   .msg.ai { background:var(--bg); border:1px solid var(--line); align-self:flex-start; }
@@ -66,9 +75,10 @@
 </head>
 <body>
 <main>
-  <h1>Barcode Scanner</h1>
-
-  <section class="card">
+  <h1>Kiểm tra đóng gói</h1>
+  <div class="grid">
+  <section class="card panel" id="pScan" aria-labelledby="pScanH">
+    <h2 id="pScanH">📷 Camera scanner</h2>
     <div class="tabs" role="tablist">
       <button role="tab" id="tabCam" aria-selected="true" aria-controls="camMode" tabindex="0">📷 Camera</button>
       <button role="tab" id="tabUp" aria-selected="false" aria-controls="upMode" tabindex="-1">📁 Upload image</button>
@@ -104,10 +114,18 @@
       <input type="text" id="manual" placeholder="Or type a barcode number (6–14 digits)" inputmode="numeric" aria-label="Barcode number">
       <button id="manualBtn">Look up</button>
     </div>
+    <div class="result" id="result" hidden></div>
   </section>
-
-  <section class="card">
-    <strong>Đơn hàng đang đóng gói</strong>
+  <section class="card panel" id="pChat" aria-labelledby="pChatH">
+    <h2 id="pChatH">💬 AI Chat</h2>
+    <div class="chat" id="chat" aria-live="polite"></div>
+    <form class="row" id="chatForm">
+      <input type="text" id="chatInput" placeholder="Hỏi về sản phẩm, đơn hàng…" aria-label="Tin nhắn cho trợ lý" maxlength="1000">
+      <button class="primary">Gửi</button>
+    </form>
+  </section>
+  <section class="card panel" id="pOrder" aria-labelledby="pOrderH">
+    <h2 id="pOrderH">📦 Đơn</h2>
     <form class="row" id="orderForm">
       <input type="text" id="orderId" placeholder="Mã đơn, vd SO-104587" aria-label="Mã đơn hàng">
       <button class="primary" id="orderLoad">Tải đơn</button>
@@ -115,30 +133,20 @@
     </form>
     <div id="order" hidden></div>
   </section>
-
-  <section class="card result" id="result" hidden></section>
-
-  <section class="card">
-    <strong>Trợ lý AI</strong>
-    <div class="chat" id="chat" aria-live="polite"></div>
-    <form class="row" id="chatForm">
-      <input type="text" id="chatInput" placeholder="Hỏi về sản phẩm, đơn hàng…" aria-label="Tin nhắn cho trợ lý" maxlength="1000">
-      <button class="primary">Gửi</button>
-    </form>
-  </section>
-
-  <section class="card">
+  <section class="card panel" id="pHist" aria-labelledby="pHistH">
+    <h2 id="pHistH">🕘 History</h2>
     <div class="row" style="margin:0;justify-content:space-between">
-      <strong>History</strong>
+      <span class="muted">Mã đã quét gần đây</span>
       <span class="row" style="margin:0">
         <button id="csvBtn">Export CSV</button>
         <button id="copyAllBtn">Copy all</button>
         <button id="clearBtn">Clear</button>
       </span>
     </div>
-    <ul class="hist" id="hist"></ul>
+    <div class="scroll"><ul class="hist" id="hist"></ul></div>
     <p class="muted" id="histEmpty">No scans yet.</p>
   </section>
+  </div>
 </main>
 <div id="toast" role="status"></div>
 
