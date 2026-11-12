@@ -50,10 +50,11 @@ google_llm = ChatGoogleGenerativeAI(
     model='gemini-3.1-flash-lite',
     temperature=0,
     max_output_tokens=1024,  # trần chi phí mỗi lần gọi; câu trả lời thực tế dưới 300 token
-    # Model chính: 20 s x 2 lần thử = tối đa 40 s, còn ~80 s của TURN_DEADLINE (120 s) cho model dự phòng.
-    # Đo 12/11/2026: chậm nhất 4.5 s, nên 20 s chỉ cắt khi model thật sự treo.
-    timeout=20,
-    max_retries=RETRIES_IN_CHAIN,
+    # Model chính: treo (lỗi 504 DEADLINE_EXCEEDED) thì không thử lại mà chuyển ngay model dự phòng.
+    # Đo 12/11/2026, 8 câu qua agent: deadline 15 s -> 0 lỗi, trung vị 6.5 s; 10 s -> 5/8 lỗi (Gemini chậm hôm đó).
+    # Dưới 10 s Gemini từ chối mọi request (400 "Minimum allowed deadline is 10s").
+    timeout=15,
+    max_retries=0,
 )
 
 # Gemini gói free tính quota riêng cho từng model -> model thứ 2 là thêm 1 phần quota khi model trên hết
@@ -80,14 +81,15 @@ groq_llm = ChatGroq(
 #   OpenRouter nemotron-3-ultra 5/5, trung vị 4.8-5.5 s (có lần 33 s) | NVIDIA nemotron-3.5-super 5/5, 5-6 s (chậm nhất 25 s)
 #   gemini-3.5-flash-lite 5/5, 6.1 s | Groq qwen3.8 4/5 (1 lần lỗi gọi tool), 1.1 s nhưng quota token/phút nhỏ -> cuối
 MAIN_LLM = google_llm
-def _has_key(var: str) -> bool:
-    return os.getenv(var, '') not in ('', 'unused')
+def _has_key(*names: str) -> bool:
+    return any(os.getenv(n, '').strip().lower() not in ('', 'unused') for n in names)
 
 
 # Model chính hỏng/hết quota thì thử lần lượt các model này (xem fallback.py). Hãng không có key thì bỏ hẳn khỏi
 # chuỗi: thư viện NVIDIA vẫn gửi request (cả hội thoại) khi thiếu key, chỉ in cảnh báo.
 FALLBACK_LLMS = [m for m, var in [(open_llm, 'OPENROUTER_API_KEY'), (nvidia_llm, 'NVIDIA_API_KEY'),
-                                  (google_llm_alt, 'GOOGLE_API_KEY'), (groq_llm, 'GROQ_API_KEY')] if _has_key(var)]
+                                  (google_llm_alt, ('GOOGLE_API_KEY', 'GEMINI_API_KEY')),
+                                  (groq_llm, 'GROQ_API_KEY')] if _has_key(*([var] if isinstance(var, str) else var))]
 
 def model_name(llm) -> str:
     return getattr(llm, 'model', None) or getattr(llm, 'model_name', None) or type(llm).__name__
@@ -115,7 +117,7 @@ def is_rate_limited(e: Exception) -> bool:
 def is_timeout(e: Exception) -> bool:
     # httpx (OpenRouter, Gemini, Groq), asyncio/aiohttp (NVIDIA), lỗi riêng của SDK (APITimeoutError...)
     return (isinstance(e, (TimeoutError, httpx.TimeoutException)) or 'Timeout' in type(e).__name__
-            or nvidia_status(e) == 504)
+            or nvidia_status(e) == 504 or 'DEADLINE_EXCEEDED' in str(e))  # Gemini: GoogleAPIError 504 (seen 12/11/2026)
 
 
 def is_daily_limit(e: Exception) -> bool:

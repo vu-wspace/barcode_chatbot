@@ -98,6 +98,7 @@ def _status(code):
     (httpx.ReadTimeout('read timed out'), F.TIMEOUT_COOLDOWN_S),
     (groq.APITimeoutError(request=httpx.Request('POST', 'https://x')), F.TIMEOUT_COOLDOWN_S),
     (Exception('[504] Gateway Timeout'), F.TIMEOUT_COOLDOWN_S),
+    (RuntimeError('504 Gateway Timeout. {"status": "DEADLINE_EXCEEDED"}'), F.TIMEOUT_COOLDOWN_S),  # Gemini
     (__import__('langchain_core.exceptions', fromlist=['x']).ModelRateLimitError(
         'Quota exceeded for metric: GenerateRequestsPerDayPerProjectPerModel'), F.DAILY_COOLDOWN_S),
     (rate_limited(), F.MINUTE_COOLDOWN_S),
@@ -126,7 +127,7 @@ def test_providers_without_a_key_are_left_out_of_the_chain(monkeypatch):
     from packing_agent import llm
     try:
         monkeypatch.setenv('NVIDIA_API_KEY', '')
-        monkeypatch.setenv('GROQ_API_KEY', 'unused')
+        monkeypatch.setenv('GROQ_API_KEY', ' UNUSED ')
         monkeypatch.setenv('OPENROUTER_API_KEY', 'k')
         monkeypatch.setenv('GOOGLE_API_KEY', 'k')
         importlib.reload(llm)

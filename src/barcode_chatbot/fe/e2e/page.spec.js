@@ -216,19 +216,23 @@ test('product card shows a loading state, and is skipped for non-product codes',
 });
 
 test('camera: an item left in view is counted once, a second unit after it left the frame', async ({ page }) => {
+  // Timing-based: on a loaded machine detect() gets slow, so the waits below are generous and the test has 60 s.
+  // Fixed waits that must hold ("still 1/1 after the pause") stay as they are; only waits for something to happen grew.
+  test.setTimeout(60000);
   await loadOrder(page);
   await page.click('#startBtn');
   await page.click('#batchBtn');                       // batch mode: 1.2 s pause, the hardest case
   await page.evaluate(() => { window.__cam = '8935000100011'; });
   const row = page.locator('#order li', { hasText: 'HD-1001' });
-  await expect(row).toContainText('1/1 ✓');
+  await expect(row).toContainText('1/1 ✓', { timeout: 15000 });
   await page.waitForTimeout(3000);                     // pause is over, the same headphones are still in view
   await expect(row).toContainText('1/1 ✓');
-  await expect(page.locator('#feedback')).toContainText('Đưa ra khỏi khung');
+  await expect(page.locator('#feedback')).toContainText('Đưa ra khỏi khung', { timeout: 15000 });
   await page.evaluate(() => { window.__cam = null; }); // packer takes it away...
-  await page.waitForTimeout(1000);
+  await expect(page.locator('#feedback')).not.toContainText('Đưa ra khỏi khung', { timeout: 15000 }); // seen as gone
+  await page.waitForTimeout(1500);                      // well past the 0.7 s re-arm, even with slow frames
   await page.evaluate(() => { window.__cam = '8935000100011'; }); // ...and shows a second unit
-  await expect(row).toContainText('2/1');
+  await expect(row).toContainText('2/1', { timeout: 15000 });
   await page.click('#stopBtn');
 });
 
@@ -411,4 +415,33 @@ test('SSE reset drops the text streamed so far', async ({ page, request }) => {
   await page.fill('#chatInput', 'hi');
   await page.press('#chatInput', 'Enter');
   await expect(page.locator('.msg.ai').last()).toHaveText('Dạ ok');
+});
+
+
+test('chat checklist card stays above the AI reply when the order is re-rendered later', async ({ page, request }) => {
+  await scriptAI(request, { chunks: [sse('done', { thread_id: 't', answer: 'giải thích', tools: [] })] });
+  await loadOrder(page);
+  await typeCode(page, '8935000100011');
+  await expect(page.locator('#chat .msg.ai').last()).toHaveText('giải thích');
+  await page.click('#orderReset');                      // re-renders the order without a new scan
+  await expect(page.locator('#chat .msg.checklist')).toContainText('Chưa quét sản phẩm nào');
+  const last = await page.$$eval('#chat .msg', (ms) => ms[ms.length - 1].className);
+  expect(last).toContain('ai');                          // not moved below the reply on every render
+});
+
+test('camera: right after a read the decode retries run on every frame, then fall back to every 3rd', async ({ page }) => {
+  await loadOrder(page);
+  await page.click('#startBtn');
+  await page.evaluate(() => { window.__cam = '8935000100011'; });
+  await expect(page.locator('#feedback')).toContainText('Đưa ra khỏi khung', { timeout: 10000 }); // counted, still read
+  await page.evaluate(() => { window.__cam = null; window.__plainReads = 0; window.__retryReads = 0; });
+  await page.waitForTimeout(600);                        // inside the 2 s window: plain read + 4 retries per frame
+  const hot = await page.evaluate(() => ({ p: window.__plainReads, r: window.__retryReads }));
+  expect(hot.r).toBeGreaterThanOrEqual(hot.p * 3);
+  await page.waitForTimeout(2500);
+  await page.evaluate(() => { window.__plainReads = 0; window.__retryReads = 0; });
+  await page.waitForTimeout(1200);
+  const cold = await page.evaluate(() => ({ p: window.__plainReads, r: window.__retryReads }));
+  expect(cold.r).toBeLessThanOrEqual(Math.ceil(cold.p / 3) * 4 + 4);
+  await page.click('#stopBtn');
 });

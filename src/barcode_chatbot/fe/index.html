@@ -312,13 +312,14 @@
     // Retries cost up to 4 extra decodes per frame: run them while a code was read in the last 2 s (an item is being
     // shown) and otherwise on every 3rd empty frame, so an idle camera on a stand does not keep the CPU busy.
     var hot = Date.now() - (S.lastHit || 0) < 2000;
-    if (!hot && ++S.idleFrames % 3) order = [S.variant || 0];
+    if (!hot && ++S.idleFrames % 3) order = [VARIANTS[S.variant || 0].rot ? 0 : S.variant || 0];
     var i = 0, tok = ++S.detectTok; // a chain left behind by the 3 s timeout stops instead of racing the new one
     function next() {
       if (i >= order.length || !S.scanning || tok !== S.detectTok) return Promise.resolve([]);
       var n = order[i++], x = VARIANTS[n];
       return S.detector.detect(variantSource(v, x)).then(function (codes) {
         if (!codes.length) return next();
+        if (tok !== S.detectTok) return [];
         S.variant = n; S.lastHit = Date.now();
         return codes.map(function (c) { // boxes back in video pixels; a rotated read has no usable box
           var b = c.boundingBox, k = x.scale || 1;
@@ -509,8 +510,9 @@
       // a complete box showing "OK to seal" with an extra item inside. If it was an order label after all, the
       // count/verify shows it as an unknown code, so the box is not sealed either.
       if (onMissing) missing = true;
-      if (e.status !== 404) toast((onMissing ? 'Không kiểm tra được mã đơn, đã tính là mã quét' : 'Không tải được đơn') +
-        ' (' + e.message + ')', true);
+      if (e.status !== 404) toast((!onMissing ? 'Không tải được đơn'
+        : S.order ? 'Không kiểm tra được mã đơn, đã tính là mã quét. Nếu là tem đơn mới: bấm "Quét lại từ đầu" rồi nhập mã đơn'
+        : 'Không kiểm tra được mã đơn') + ' (' + e.message + ')', true);
       else if (!onMissing) toast('Không có đơn ' + id, true);
     }).then(function () {
       if (req !== S.orderReq) return;

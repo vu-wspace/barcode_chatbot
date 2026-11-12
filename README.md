@@ -49,7 +49,7 @@ lời câu hỏi về sản phẩm và đơn hàng.
 - **Trợ lý AI (tiếng Việt):** câu trả lời stream theo thời gian thực (SSE). AI dùng 4 tool gọi API của BE:
   `get_product`, `search_products`, `get_order`, `verify_order`. Lịch sử hội thoại lưu trong Postgres.
 - **Ổn định:** hủy lượt khi client ngắt kết nối, giới hạn thời gian mỗi lượt, mỗi hội thoại chạy từng lượt một
-  (khóa cả trong process và trong Postgres), thử lại không chạy lặp, chuỗi model dự phòng khi model chính lỗi hoặc treo (model chính chờ tối đa 20 s; model vừa bị giới hạn hoặc quá thời gian được tạm bỏ qua).
+  (khóa cả trong process và trong Postgres), thử lại không chạy lặp, chuỗi model dự phòng khi model chính lỗi hoặc treo (model chính chờ tối đa 15 s, không thử lại; model vừa bị giới hạn hoặc quá thời gian được tạm bỏ qua).
 
 ## Kiến trúc
 
@@ -209,9 +209,11 @@ Mở http://localhost:8080, quét tem hoặc nhập đơn `SO-104587`, rồi qu�
 
 Dữ liệu mẫu (`be/app/seed.sql`): 7 sản phẩm, 3 đơn `SO-104587` (3 sản phẩm), `SO-104588` (chuột ×2, Salonpas ×3)
 và `X55277605433` (Salonpas ×1, vở ClassMate ×3, chuyển từ hệ thống `barcode_cv` cũ).
-Thêm 250 đơn giả `SO-200001`…`SO-200250` (`be/app/seed_orders.py`): mỗi đơn 2–5 sản phẩm còn hàng, số lượng 1–4,
-tên khách giả. Seed cố định nên lần nào cũng ra cùng dữ liệu; đơn đã có (kể cả đã sửa) không bị ghi đè. Tạo lại:
-`cd src/barcode_chatbot/be && uv run python -m app.seed_orders --clean` (thêm `--count`, `--seed`, `--sql-out file.sql` nếu cần).
+Đơn giả cho demo/thử tải (`be/app/seed_orders.py`, bật bằng `SEED_MOCK_ORDERS=true`, mặc định tắt): 250 đơn
+`DEMO-000001`…`DEMO-000250`, mỗi đơn 2–5 sản phẩm còn hàng, số lượng 1–4, tên khách giả. Tiền tố `DEMO-` không bao giờ
+trùng mã đơn thật, nên đơn giả không thể thay chỗ đơn thật và `--clean` không xóa nhầm đơn thật. Seed cố định: lần nào
+cũng ra cùng đơn; đơn đã có (kể cả đã sửa) không bị ghi đè; kho còn dưới 2 sản phẩm còn hàng thì `migrate` bỏ qua đơn giả.
+Tạo lại: `cd src/barcode_chatbot/be && uv run python -m app.seed_orders --clean` (thêm `--count`, `--seed`, `--sql-out file.sql`).
 
 > Mạng có SSL inspection (proxy công ty): đặt chứng chỉ CA (`*.crt`) vào `src/barcode_chatbot/agent/certs/` rồi build lại `ai`.
 > Thư mục này bị git bỏ qua.
@@ -229,6 +231,7 @@ tên khách giả. Seed cố định nên lần nào cũng ra cùng dữ liệu;
 | `GROQ_API_KEY` | | ai | Groq, model dự phòng cuối cùng. Để trống hoặc `unused` thì bị bỏ khỏi chuỗi |
 | `LANGSMITH_API_KEY`, `LANGSMITH_TRACING`, `LANGSMITH_PROJECT` | | ai | Tracing. `true` sẽ gửi cả hội thoại lên LangSmith |
 | `SEED_DEMO` | | migrate | `true` (mặc định) nạp dữ liệu mẫu; không ghi đè dòng đã sửa |
+| `SEED_MOCK_ORDERS` | | migrate | `true` nạp thêm 250 đơn giả `DEMO-…`; mặc định `false` |
 | `GATE_PORT` | | gate | Cổng trên máy, mặc định `8080` |
 | `DATABASE_URL` | | chạy BE ngoài Docker | Dùng `127.0.0.1:5433`, không dùng `localhost` |
 | `DOCS` | | be, ai | `true` bật `/docs` và `openapi.json` khi phát triển; mặc định tắt |
@@ -289,11 +292,12 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 
 | Bộ test | Lệnh | Cần |
 |---|---|---|
-| Agent (73 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
+| Agent (80 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
 | Agent với Postgres | `TEST_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5433/barcode_chatbot uv run pytest` | DB đang chạy; dùng schema tạm rồi xóa |
+| BE: đơn giả (không cần DB) | `cd src/barcode_chatbot/be && uv run pytest` | Chỉ cần `uv` |
 | BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test) |
 | Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |
-| Trang: logic quét + E2E Playwright (27 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
+| Trang: logic quét + E2E Playwright (29 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
 
 Phạm vi test logic quét (`core.test.js`): số kiểm tra GS1, đồng thuận nhiều khung hình, chống đếm trùng (món để yên,
 món rời khung rồi quay lại, nhiều mã trong khung theo thứ tự bất kỳ, món nằm yên mà tạm không đọc được).

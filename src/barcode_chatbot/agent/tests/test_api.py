@@ -120,6 +120,8 @@ def _openrouter(E, cls, data_cls, code):
     (lambda: __import__('openrouter.errors', fromlist=['x']).NoResponseError(), 502),
     (lambda: Exception('[429] Too Many Requests'), 429),   # NVIDIA: bare Exception, same rule as the chain
     (lambda: Exception('[500] Internal Server Error'), 502),
+    (lambda: httpx.ReadTimeout('read timed out'), 504),   # last model of the chain timed out
+    (lambda: Exception('[504] Gateway Timeout'), 504),
     (lambda: RuntimeError('bug'), 500),  # lỗi lạ vẫn ra event error, không làm đứt stream
 ])
 def test_errors_become_error_events(client, monkeypatch, make_error, status):
@@ -290,3 +292,29 @@ def test_partial_text_of_a_failed_model_is_reset_before_the_fallback_answer(clie
     after = names.index('reset')
     shown = ''.join(d['text'] for e, d in events[after:] if e == 'token')
     assert shown == dict(events)['done']['answer'] == 'Dạ, còn 25 cái nha.'
+
+
+@pytest.mark.parametrize('error', [
+    lambda prompt: groq.InternalServerError(prompt, response=httpx.Response(500, request=httpx.Request('POST', 'https://g')), body=None),
+    lambda prompt: groq.RateLimitError(prompt, response=httpx.Response(429, request=httpx.Request('POST', 'https://g')), body=None),
+])
+def test_provider_errors_are_logged_short_and_without_traceback(client, monkeypatch, caplog, error):
+    # a provider error can quote the prompt (order data): only its first 200 characters go to the log
+    secret = 'x' * 250 + 'TAIL-MARKER'
+    llm = Raising(messages=iter([]), disable_streaming=True)
+    llm.error = error(secret)
+    use(monkeypatch, llm)
+    chat(client, message='hi', thread_id=str(uuid.uuid4()), request_id=str(uuid.uuid4()))
+    assert 'TAIL-MARKER' not in caplog.text
+    assert all(r.exc_info is None for r in caplog.records if r.name.startswith('packing_agent'))
+
+
+def test_text_before_a_tool_call_is_reset_when_the_tool_starts(client, monkeypatch):
+    use(monkeypatch, model(AIMessage('Dạ để em tra cứu mã này cho anh nhé ',
+                                     tool_calls=[{'name': 'get_product', 'args': {'code': '8935000100011'}, 'id': 'c1'}]),
+                           AIMessage('Dạ, còn 25 cái nha.')))
+    events = chat(client, message='hi', thread_id=str(uuid.uuid4()), request_id=str(uuid.uuid4()))
+    names = [e for e, _ in events]
+    assert names.index('token') < names.index('reset') < names.index('tool')  # placeholder shows during the lookup
+    after = names.index('tool')
+    assert ''.join(d['text'] for e, d in events[after:] if e == 'token') == dict(events)['done']['answer']

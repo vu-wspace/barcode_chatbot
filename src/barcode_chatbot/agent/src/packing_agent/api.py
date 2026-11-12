@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from packing_agent import tools
 from packing_agent.agent import build_agent
-from packing_agent.llm import is_rate_limited, nvidia_status  # one rule for the fallback chain and the HTTP status
+from packing_agent.llm import is_rate_limited, is_timeout, nvidia_status  # one rule for the fallback chain and the HTTP status
 from packing_agent.prompts import StreamCleaner
 
 log = logging.getLogger('uvicorn.error')
@@ -64,7 +64,7 @@ class TurnError(Exception):
 def to_turn_error(e: Exception) -> TurnError:
     if isinstance(e, TurnError):
         return e
-    if isinstance(e, TimeoutError):
+    if isinstance(e, TimeoutError) or is_timeout(e):  # turn deadline, or the last model of the chain timed out
         return TurnError(504, 'Trợ lý trả lời quá lâu, anh/chị vui lòng thử lại.')
     if is_rate_limited(e):
         log.warning('LLM rate limit: %s', str(e)[:200])  # loại giới hạn (token/phút, /ngày...) để biết chờ hay nâng gói
@@ -242,19 +242,21 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                     if meta.get('langgraph_node') != 'model':
                         continue
                     # model stream -> tool_call_chunks; model không stream (vd fallback) -> tool_calls đầy đủ
+                    # Text shown so far is not the answer when a new model message starts (the model that wrote it
+                    # failed mid-answer and a fallback answers again) or a tool call follows it: the page drops it.
+                    if msg.text and msg.id != msg_id:
+                        if cleaner.sent:
+                            await out.put(sse('reset', {}))
+                        cleaner, msg_id = StreamCleaner(), msg.id
+                    if msg.text and (piece := cleaner.push(msg.text)):  # the stored answer is cleaned by the
+                        await out.put(sse('token', {'text': piece}))  # middleware; clean the live pieces too
                     for tc in (getattr(msg, 'tool_call_chunks', None) or getattr(msg, 'tool_calls', None) or []):
                         if tc.get('name') and tc.get('id') not in sent_tools:
                             sent_tools.add(tc.get('id'))
-                            await out.put(sse('tool', {'name': tc['name']}))
-                    if msg.text:  # the stored answer is cleaned by the middleware; clean the live pieces too
-                        if msg.id != msg_id:
-                            # A new model message: the earlier one was text before a tool call, or a model that failed
-                            # mid-answer (the fallback answers again). Neither is the answer: the page drops it.
                             if cleaner.sent:
                                 await out.put(sse('reset', {}))
-                            cleaner, msg_id = StreamCleaner(), msg.id
-                        if piece := cleaner.push(msg.text):
-                            await out.put(sse('token', {'text': piece}))
+                            cleaner = StreamCleaner()  # a held-back word of the pre-tool text is dropped too
+                            await out.put(sse('tool', {'name': tc['name']}))
                 if tail := cleaner.flush():
                     await out.put(sse('token', {'text': tail}))
                 new = (await agent.aget_state(config)).values['messages'][n_before:]

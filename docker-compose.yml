@@ -26,7 +26,8 @@ services:
     environment:
       # a password with @ : / ? # % must be URL-encoded in these URLs
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/barcode_chatbot
-      SEED_DEMO: ${SEED_DEMO:-true}  # demo products + orders SO-104587, SO-104588 (never overwrites edited rows)
+      SEED_DEMO: ${SEED_DEMO:-true}  # demo products + orders SO-104587, SO-104588, X55277605433 (never overwrites edited rows)
+      SEED_MOCK_ORDERS: ${SEED_MOCK_ORDERS:-false}  # 250 fake orders DEMO-000001... for demos/load tests
       BE_DB_PASSWORD: ${BE_DB_PASSWORD:?set BE_DB_PASSWORD in .env}
       AI_DB_PASSWORD: ${AI_DB_PASSWORD:?set AI_DB_PASSWORD in .env}
     depends_on:
@@ -55,11 +56,11 @@ services:
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in .env}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:?set GOOGLE_API_KEY in .env}
-      # fallback chain (llm.FALLBACK_LLMS): a missing key only puts that model on a 1 h cooldown
+      # fallback chain (llm.FALLBACK_LLMS): a provider whose key is empty or 'unused' is left out of it
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-unused}  # ChatGroq refuses to start without some key
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}  # true sends whole conversations (customer names) to LangSmith
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}  # true sends whole conversations (what staff type, tool results) to LangSmith
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-barcode-chatbot}
       BE_URL: http://be:8000
       # chat history (LangGraph checkpoints) in schema "agent", owned by ai_app; no access to shop tables

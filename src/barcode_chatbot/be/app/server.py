@@ -27,6 +27,9 @@ from app import seed_orders
 load_dotenv()
 HERE = Path(__file__).parent
 SEED_DEMO = os.getenv("SEED_DEMO", "false").lower() == "true"
+# 250 fake orders DEMO-000001... for demos/load tests (app/seed_orders.py); separate and off by default, so a real
+# deployment that keeps SEED_DEMO=true for its sample products never gets fake orders
+SEED_MOCK_ORDERS = os.getenv("SEED_MOCK_ORDERS", "false").lower() == "true"
 
 # Barcodes, SKUs and order ids: letters, digits, dash. Same rule as SAFE_CODE in the scanner page. Anything else
 # (a QR URL, text with '/' or '..') is rejected before it reaches SQL or a route.
@@ -144,12 +147,16 @@ def _setup(conn) -> list[str]:
         ran = migrate(conn)
         if SEED_DEMO:
             conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
-            seed_orders.insert(conn)  # 250 mock orders SO-200001..., same every time, existing ones untouched
+            conn.commit()
+        if SEED_MOCK_ORDERS:
+            seed_orders.insert(conn, strict=False)  # same orders every time, existing ones untouched
             conn.commit()
         provision_roles(conn)
         return ran
     finally:
-        conn.rollback()  # after a failed step the transaction is aborted: unlocking in it would hide the real error
+        # Every step above commits its own work, so this only drops an aborted transaction: unlocking inside it
+        # would fail and hide the real error. A new step must commit before this point.
+        conn.rollback()
         conn.execute("SELECT pg_advisory_unlock(hashtext('barcode_chatbot.migrate'))")  # pooled sessions live on
         conn.commit()
 
@@ -290,7 +297,9 @@ def check_role_passwords_not_in_sql(conn):
     secrets = [os.environ["BE_DB_PASSWORD"], os.environ["AI_DB_PASSWORD"]]
     assert rec.sent and not any(pw in stmt for pw in secrets for stmt in rec.sent), "plaintext role password in SQL"
     rows = conn.execute("SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('be_app', 'ai_app')").fetchall()
-    assert len(rows) == 2 and all(r["rolpassword"].startswith("SCRAM-SHA-256$") for r in rows),         [(r["rolname"], (r["rolpassword"] or "")[:14]) for r in rows]  # never print a whole verifier (offline cracking)
+    # message: only the hash type, never a whole verifier (it allows offline cracking)
+    hashes_ok = len(rows) == 2 and all(r["rolpassword"].startswith("SCRAM-SHA-256$") for r in rows)
+    assert hashes_ok, [(r["rolname"], (r["rolpassword"] or "")[:14]) for r in rows]
 
 
 def check_concurrent_setup():
@@ -329,6 +338,37 @@ def check_concurrent_setup():
             admin.execute("DROP DATABASE IF EXISTS migrate_race_check WITH (FORCE)")
 
 
+def check_failed_setup_releases_lock():
+    """A step of _setup that fails inside its transaction: the real error comes out (not "current transaction is
+    aborted" from the unlock) and the migrate lock is free again for the next run. Scratch database, dropped after."""
+    import psycopg
+    from psycopg.conninfo import make_conninfo
+
+    global SEED_MOCK_ORDERS
+    url = os.environ["DATABASE_URL"]
+    with psycopg.connect(url, autocommit=True) as admin:
+        admin.execute("DROP DATABASE IF EXISTS setup_fail_check WITH (FORCE)")
+        admin.execute("CREATE DATABASE setup_fail_check")
+    real_insert, real_flag = seed_orders.insert, SEED_MOCK_ORDERS
+    try:
+        scratch = make_conninfo(url, dbname="setup_fail_check")
+        seed_orders.insert = lambda conn, **kw: conn.execute("SELECT 1 / 0")  # aborts the open transaction
+        SEED_MOCK_ORDERS = True
+        with psycopg.connect(scratch, row_factory=dict_row) as c, psycopg.connect(scratch) as other:
+            try:
+                _setup(c)
+                raise AssertionError("_setup did not raise")
+            except psycopg.errors.DivisionByZero:
+                pass  # the step's own error, not InFailedSqlTransaction
+            got = other.execute("SELECT pg_try_advisory_lock(hashtext('barcode_chatbot.migrate'))").fetchone()[0]
+            assert got, "migrate lock still held after a failed setup"
+            other.execute("SELECT pg_advisory_unlock(hashtext('barcode_chatbot.migrate'))")
+    finally:
+        seed_orders.insert, SEED_MOCK_ORDERS = real_insert, real_flag
+        with psycopg.connect(url, autocommit=True) as admin:
+            admin.execute("DROP DATABASE IF EXISTS setup_fail_check WITH (FORCE)")
+
+
 def check():
     """Self-check through the HTTP API against DATABASE_URL, using the demo data (SEED_DEMO=true)."""
     from fastapi.testclient import TestClient
@@ -337,6 +377,7 @@ def check():
     assert compare({"A": 1}, {"A": 3}) == ({}, {"A": 2})
     check_migrations()
     check_concurrent_setup()
+    check_failed_setup_releases_lock()
     pool.open(wait=True, timeout=30)
     with pool.connection() as conn:
         check_role_passwords_not_in_sql(conn)

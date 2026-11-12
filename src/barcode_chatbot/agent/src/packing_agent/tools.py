@@ -41,16 +41,20 @@ def search_products(query: str = '') -> str:
     return _call('GET', '/products', 'Không tìm thấy sản phẩm.', params={'q': query.strip()})
 
 
+ORDER_FIELDS = ('order_id', 'status', 'created_at', 'items')
+
+
 @tool
 def get_order(order_id: str) -> str:
     """Xem đơn hàng: trạng thái và danh sách sản phẩm cần đóng gói (sku, tên, mã vạch, số lượng)."""
     out = _call('GET', f'/orders/{quote(order_id.strip(), safe="")}', f'Không có đơn hàng "{order_id}".')
-    try:  # tên khách không gửi cho LLM (dữ liệu cá nhân, tới 5 hãng); màn hình đơn đã hiện tên khách
+    try:
         order = json.loads(out)
     except ValueError:
         return out  # thông báo lỗi / không có đơn
-    order.pop('customer', None)
-    return json.dumps(order, ensure_ascii=False)
+    # Chỉ các trường agent cần. Tên khách (và cột cá nhân nào BE thêm sau này) không gửi cho LLM: tới 5 hãng nhận
+    # hội thoại; màn hình đơn đã hiện tên khách.
+    return json.dumps({k: order[k] for k in ORDER_FIELDS if k in order}, ensure_ascii=False)
 
 
 @tool
