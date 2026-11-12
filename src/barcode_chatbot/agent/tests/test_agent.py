@@ -18,14 +18,14 @@ class QuotaExceededModel(FakeModel):
 @pytest.fixture
 def models(monkeypatch):
     monkeypatch.setattr(agent_module, 'open_llm', QuotaExceededModel(messages=iter([])))
-    monkeypatch.setattr(agent_module, 'google_llm', FakeModel(messages=iter([AIMessage('Dạ, em trả lời bằng model dự phòng ạ.')])))
+    monkeypatch.setattr(agent_module, 'FALLBACK_LLMS', [FakeModel(messages=iter([AIMessage('Dạ, em trả lời bằng model dự phòng ạ.')]))])
 
 
 def ask(agent) -> str:
     return agent.invoke({'messages': [{'role': 'user', 'content': 'chào'}]})['messages'][-1].text
 
 
-def test_falls_back_to_gemini_when_primary_fails(models):
+def test_falls_back_when_primary_fails(models):
     # the fallback's answer also goes through the middleware: its sentence-final 'ạ' is dropped
     assert ask(agent_module.build_agent()) == 'Dạ, em trả lời bằng model dự phòng.'
 

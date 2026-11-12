@@ -21,7 +21,7 @@ import groq
 import psycopg
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from langchain_core.exceptions import ModelError, ModelRateLimitError
+from langchain_core.exceptions import ModelError
 from langchain_core.messages import RemoveMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
@@ -30,7 +30,8 @@ from pydantic import BaseModel, Field
 
 from packing_agent import tools
 from packing_agent.agent import build_agent
-from packing_agent.prompts import strip_final_a
+from packing_agent.llm import is_rate_limited  # one rule for the fallback chain and the HTTP status
+from packing_agent.prompts import clean_text
 
 log = logging.getLogger('uvicorn.error')
 
@@ -58,19 +59,6 @@ class TurnError(Exception):
     def __init__(self, status: int, detail: str):
         super().__init__(detail)
         self.status, self.detail = status, detail
-
-
-def is_rate_limited(e: Exception) -> bool:
-    # Gemini (langchain-google-genai) ném ModelRateLimitError chung của langchain_core.
-    # Groq ném lỗi riêng: 429, hoặc 413 "Request too large" kèm code rate_limit_exceeded.
-    # OpenRouter (SDK openrouter) cũng ném lỗi riêng, không kế thừa ModelError.
-    if isinstance(e, (ModelRateLimitError, groq.RateLimitError, openrouter_errors.TooManyRequestsResponseError)):
-        return True
-    if not isinstance(e, groq.APIError):
-        return False
-    body = e.body if isinstance(e.body, dict) else {}
-    err = body.get('error')
-    return (err if isinstance(err, dict) else body).get('code') == 'rate_limit_exceeded'
 
 
 def to_turn_error(e: Exception) -> TurnError:
@@ -257,7 +245,7 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                             sent_tools.add(tc.get('id'))
                             await out.put(sse('tool', {'name': tc['name']}))
                     if msg.text:  # the stored answer is cleaned by the middleware; clean the live pieces too
-                        await out.put(sse('token', {'text': strip_final_a(msg.text)}))
+                        await out.put(sse('token', {'text': clean_text(msg.text)}))
                 new = (await agent.aget_state(config)).values['messages'][n_before:]
                 result = {
                     'thread_id': thread_id,

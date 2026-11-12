@@ -53,6 +53,14 @@ def test_strip_final_a():
     assert strip_final_a(keep) == keep
 
 
+def test_markdown_markers_removed():
+    from packing_agent.prompts import clean_text
+    assert clean_text('Dạ, mã này là **Tai nghe** (SKU: HD-1001) nha ạ.') == 'Dạ, mã này là Tai nghe (SKU: HD-1001) nha.'
+    assert clean_text('## Kết quả\n* Thiếu __cáp__ ×1\n  • Củ sạc ×1') == 'Kết quả\n- Thiếu cáp ×1\n  - Củ sạc ×1'
+    keep = 'Giá 2*3 = 6, mã SO-1 #2, A_B_C'
+    assert clean_text(keep) == keep
+
+
 def test_middleware_cleans_stored_answer():
     from langchain_core.messages import AIMessage
     from packing_agent.history import clean_response

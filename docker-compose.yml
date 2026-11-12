@@ -55,7 +55,9 @@ services:
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in .env}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:?set GOOGLE_API_KEY in .env}
-      GROQ_API_KEY: ${GROQ_API_KEY:-unused}  # llm.py builds a Groq client; the agent does not call it
+      # fallback chain (llm.FALLBACK_LLMS): a missing key only puts that model on a 1 h cooldown
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-unused}  # ChatGroq refuses to start without some key
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}  # true sends whole conversations (customer names) to LangSmith
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-barcode-chatbot}

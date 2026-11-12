@@ -48,7 +48,7 @@ lời câu hỏi về sản phẩm và đơn hàng.
 - **Trợ lý AI (tiếng Việt):** câu trả lời stream theo thời gian thực (SSE). AI dùng 4 tool gọi API của BE:
   `get_product`, `search_products`, `get_order`, `verify_order`. Lịch sử hội thoại lưu trong Postgres.
 - **Ổn định:** hủy lượt khi client ngắt kết nối, giới hạn thời gian mỗi lượt, mỗi hội thoại chạy từng lượt một
-  (khóa cả trong process và trong Postgres), thử lại không chạy lặp, model dự phòng khi model chính lỗi.
+  (khóa cả trong process và trong Postgres), thử lại không chạy lặp, chuỗi model dự phòng khi model chính lỗi (model vừa bị giới hạn được tạm bỏ qua).
 
 ## Kiến trúc
 
@@ -64,7 +64,7 @@ flowchart LR
         DB[("Postgres 18<br/>public: products, orders, order_items<br/>agent: checkpoints (lịch sử chat)")]
     end
 
-    LLM["OpenRouter (model chính)<br/>Gemini (dự phòng)"]
+    LLM["OpenRouter (model chính)<br/>dự phòng: NVIDIA → Gemini ×2 → Groq"]
 
     U -- "HTML, /api/*, /ai/chat" --> G
     G -- "/api/*" --> BE
@@ -127,7 +127,7 @@ sequenceDiagram
     participant API as ai: /chat
     participant LG as LangGraph agent
     participant BE as be
-    participant LLM as OpenRouter / Gemini
+    participant LLM as OpenRouter / dự phòng
     participant PG as Postgres (schema agent)
 
     FE->>G: POST /ai/chat {message, thread_id, request_id}
@@ -138,7 +138,7 @@ sequenceDiagram
     else Lượt mới
         API->>PG: khóa hội thoại (asyncio + pg_try_advisory_xact_lock)
         API->>LG: astream (deadline 120 s)
-        LG->>LLM: gọi model (lỗi thì chuyển Gemini)
+        LG->>LLM: gọi model (lỗi thì chuyển model dự phòng kế tiếp)
         LG-->>FE: event: tool {name}
         LG->>BE: tool gọi /products, /orders/{id}/verify...
         LG->>LLM: gọi model với kết quả tool
@@ -184,11 +184,12 @@ Nếu một migration lỗi, `migrate` thoát với mã khác 0 và `be`, `ai` k
     └── agent/                  # trợ lý AI
         ├── src/packing_agent/
         │   ├── api.py          # POST /chat (SSE), khóa, deadline, cache thử lại, dọn state
-        │   ├── agent.py        # create_agent + model dự phòng
+        │   ├── agent.py        # create_agent + middleware cắt lịch sử và dự phòng
+        │   ├── fallback.py     # chuỗi model dự phòng, tạm bỏ qua model bị giới hạn/lỗi cấu hình
         │   ├── tools.py        # 4 tool gọi API của BE
         │   ├── prompts.py      # system prompt tiếng Việt
         │   ├── history.py      # chỉ gửi 4 lượt gần nhất cho model
-        │   └── llm.py          # OpenRouter, Gemini (Groq cấu hình sẵn, không dùng)
+        │   └── llm.py          # OpenRouter (chính); NVIDIA, Gemini, Gemini alt, Groq (dự phòng); phân loại lỗi
         └── tests/              # pytest (+ test_postgres.py khi có TEST_DATABASE_URL)
 ```
 
@@ -219,8 +220,9 @@ và `X55277605433` (Salonpas ×1, vở ClassMate ×3, chuyển từ hệ thống
 | `BE_DB_PASSWORD` | ✓ | migrate, be | Mật khẩu role `be_app`. Chỉ dùng chữ và số, vì nó nằm trong URL |
 | `AI_DB_PASSWORD` | ✓ | migrate, ai | Mật khẩu role `ai_app`. Chỉ dùng chữ và số |
 | `OPENROUTER_API_KEY` | ✓ | ai | Model chính |
-| `GOOGLE_API_KEY` | ✓ | ai | Gemini, model dự phòng |
-| `GROQ_API_KEY` | | ai | Client Groq được tạo nhưng agent không gọi |
+| `GOOGLE_API_KEY` | ✓ | ai | Gemini, 2 model dự phòng |
+| `NVIDIA_API_KEY` | | ai | NVIDIA, model dự phòng đầu tiên. Thiếu key thì model này bị bỏ qua 1 giờ mỗi lần lỗi |
+| `GROQ_API_KEY` | | ai | Groq, model dự phòng cuối cùng |
 | `LANGSMITH_API_KEY`, `LANGSMITH_TRACING`, `LANGSMITH_PROJECT` | | ai | Tracing. `true` sẽ gửi cả hội thoại (có tên khách) lên LangSmith |
 | `SEED_DEMO` | | migrate | `true` (mặc định) nạp dữ liệu mẫu; không ghi đè dòng đã sửa |
 | `GATE_PORT` | | gate | Cổng trên máy, mặc định `8080` |
@@ -274,14 +276,14 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 | Database | Mỗi service một role quyền tối thiểu: `be_app` chỉ SELECT 3 bảng; `ai_app` chỉ có schema `agent`; `postgres` chỉ dùng cho `migrate`. PUBLIC bị thu hết quyền trên database (không CONNECT, không TEMP); mật khẩu role gửi dạng SCRAM, không lọt vào log. `check()` kiểm tra lại toàn bộ quyền này. SQL luôn dùng tham số; ký tự `%`/`_` trong ô tìm kiếm được escape |
 | Gateway | Rate limit `/ai/` (30/phút, burst 20); chuyển nguyên đường dẫn đã mã hóa (không giải mã `%2F`/`..`); CSP, `X-Frame-Options`, `nosniff`, `Referrer-Policy`; ẩn phiên bản nginx; chặn `/docs` và `openapi.json`; ngắt request có Host lạ |
 | Secret | `.env` và `certs/*.crt` bị git bỏ qua; image agent chỉ nhận `*.crt`, không bao giờ nhận khóa riêng; container chỉ nhận biến cần dùng |
-| Trang | Mọi nội dung hiển thị đều được escape; câu trả lời AI hiển thị bằng `textContent`; CSV xuất ra được chặn chèn công thức |
-| Chi phí LLM | Rate limit, tối đa 8 lượt chạy cùng lúc, Gemini `max_output_tokens=1024`. Nên đặt thêm giới hạn chi tiêu trên dashboard của nhà cung cấp |
+| Trang | Mọi nội dung hiển thị đều được escape; câu trả lời AI hiển thị bằng `textContent` (dấu markdown `**`, `#`, `*` bị agent bỏ trước khi gửi); CSV xuất ra được chặn chèn công thức |
+| Chi phí LLM | Rate limit, tối đa 8 lượt chạy cùng lúc, Gemini `max_output_tokens=1024`, NVIDIA `max_completion_tokens=4096`, Groq `max_tokens=512`. Nên đặt thêm giới hạn chi tiêu trên dashboard của nhà cung cấp |
 
 ## Kiểm thử
 
 | Bộ test | Lệnh | Cần |
 |---|---|---|
-| Agent (48 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
+| Agent (52 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
 | Agent với Postgres | `TEST_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5433/barcode_chatbot uv run pytest` | DB đang chạy; dùng schema tạm rồi xóa |
 | BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test) |
 | Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |

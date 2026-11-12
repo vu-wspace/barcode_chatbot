@@ -41,3 +41,14 @@ _FINAL_A = re.compile(r'[ \t]*,?[ \t]+ạ(?=[ \t]*(?:[.!?…]|\n|$))')
 
 def strip_final_a(text: str) -> str:
     return _FINAL_A.sub('', text)
+
+
+# The chat shows plain text and the prompt forbids markdown, yet the primary model still writes **bold**: drop the
+# markers so the packer does not see raw asterisks. Bullets become "- ", the style the prompt asks for.
+_HEADING = re.compile(r'^[ \t]*#{1,6}[ \t]+', re.M)
+_BULLET = re.compile(r'^([ \t]*)[*•][ \t]+', re.M)
+
+
+def clean_text(text: str) -> str:
+    text = text.replace('**', '').replace('__', '')
+    return strip_final_a(_BULLET.sub(r'\1- ', _HEADING.sub('', text)))
