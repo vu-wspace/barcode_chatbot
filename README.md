@@ -326,7 +326,7 @@ mã không phải đơn được tra như sản phẩm, in checklist, checklist 
 đếm 1 lần, 2 món trong khung mỗi món 1 lần, lệnh giải mã treo không làm dừng quét, camera bị ngắt thì báo lỗi, mã chỉ
 đọc được bằng ảnh thu nhỏ vẫn được đếm, số lần đọc lại khi camera để không, tra mã đơn lỗi thì mã vẫn được đếm (hộp đủ
 không giữ khung xanh), ô ☐/☑ khi in, thẻ checklist trong chat (ẩn với trình đọc màn hình, không dời khi chỉ cập nhật),
-sự kiện `reset`.
+sự kiện `reset`, camera khi chưa mở đơn (món kế tiếp và cùng món đưa lại đều được đọc, món để yên không đếm lại).
 
 Thử trên 250 đơn giả qua stack thật (12/11/2026, script không nằm trong repo):
 - BE, cả 250 đơn × 8 trường hợp (đủ hàng, hộp trống, thiếu 1, thừa 1, món không thuộc đơn, mã lạ, mã GTIN-14):
@@ -337,7 +337,8 @@ Thử trên 250 đơn giả qua stack thật (12/11/2026, script không nằm tr
 Độ ổn định của camera với bộ giải mã thật được đo thủ công bằng video giả lập (`--use-file-for-fake-video-capture`):
 mã EAN-13 ở 15 điều kiện (đứng yên, xa 15–25% khung, lệch góc, nghiêng 20/45/60/90°, rung, mờ, tối + nhiễu, mờ + tối,
 chói, 2 món, khung trống) và lấy ra rồi đưa lại. Tất cả đọc được trong 0,6–2 s, mỗi món đếm đúng 1 lần, khung trống
-không đọc nhầm. Bộ video này không nằm trong repo (khoảng 1 GB).
+không đọc nhầm. Thêm một video 2 món A, B luân phiên (mỗi món 2 s, cách nhau 1 s) chạy 20 s: có hay không mở đơn đều
+đọc được 6 lần, mỗi lần món xuất hiện đếm 1 lần (trước khi bỏ khoảng dừng 5 s: chưa mở đơn chỉ đọc được 3 lần). Bộ video này không nằm trong repo (khoảng 1 GB).
 
 > Trên Windows dùng `127.0.0.1` thay cho `localhost`: `localhost` thử IPv6 trước và mỗi kết nối chờ khoảng 8 s.
 
@@ -400,6 +401,8 @@ Lỗi thường gặp:
 - Mã UPC-E (6–8 số) chưa được mở rộng thành UPC-A khi so khớp.
 - Chưa có migration kiểm tra checksum: sửa một file đã chạy sẽ không bị phát hiện.
 - Camera mới được đo bằng video giả lập, chưa thử với camera và tem thật; tự lấy nét chưa kiểm được (camera giả không có).
+- Camera không nhìn gì trong 1,2 s dừng sau mỗi lần quét: món chỉ lướt qua khung trong lúc đó bị bỏ sót, và món vừa quét
+  phải rời khung lâu hơn khoảng dừng (khoảng 2 s) mới được tính là đã lấy ra.
 - Phần so khung hình 32×24 (món nằm yên mà tạm không đọc được) chưa có test tự động; camera giả của Playwright chiếu
   hình động nên luôn bị coi là đã đổi. Camera tự chỉnh sáng mạnh cũng bị coi là đổi khung, khi đó quay về đếm theo thời gian.
 - Các cách đọc lại tốn CPU: chạy mỗi khung trong 2 s sau lần đọc được mã, sau đó 1/3 số khung. Chưa đo trên điện thoại.
