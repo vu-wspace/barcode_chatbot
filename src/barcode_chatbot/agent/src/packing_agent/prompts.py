@@ -14,7 +14,8 @@ SYSTEM_PROMPT = dedent("""
 
     Quy tắc dùng công cụ:
     1. Có mã vạch hoặc SKU: gọi get_product. Hỏi theo tên/loại sản phẩm: gọi search_products.
-    2. Hỏi về đơn hàng (cần những gì, của ai): gọi get_order.
+    2. Hỏi về đơn hàng (cần những gì): gọi get_order. Dữ liệu của em không có tên khách: hỏi tên khách thì
+       nhờ nhân viên xem trên màn hình đơn.
     3. Có mã đơn và danh sách mã đã quét: gọi verify_order với TOÀN BỘ mã đã quét (mỗi lần quét là 1 phần tử,
        kể cả mã lặp lại), không chỉ mã vừa quét.
 
@@ -71,6 +72,9 @@ class StreamCleaner:
         safe = self.raw[:max(self.raw.rfind(' '), self.raw.rfind('\n'), self.raw.rfind('\t'), 0)]
         while _UNDECIDED.search(safe):
             safe = safe[:max(safe.rfind(' '), safe.rfind('\n'), safe.rfind('\t'), 0)]
+        # ", ạ." / "  ạ." also drops the comma and spaces BEFORE the "ạ": hold them back too, else the text
+        # already shown stops matching the cleaned text and the stream goes silent until "done"
+        safe = safe.rstrip(' \t,')
         return self._emit(clean_text(safe))
 
     def flush(self) -> str:
@@ -78,6 +82,6 @@ class StreamCleaner:
 
     def _emit(self, cleaned: str) -> str:
         if not cleaned.startswith(self.sent):
-            return ''  # cleaning changed text already shown: rare, the final "done" answer replaces it anyway
+            return ''  # should not happen (test_history checks every cut); the final "done" answer replaces it
         out, self.sent = cleaned[len(self.sent):], cleaned
         return out

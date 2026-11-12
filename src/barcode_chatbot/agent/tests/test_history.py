@@ -63,13 +63,16 @@ def test_markdown_markers_removed():
 
 def test_stream_cleaner_matches_whole_answer_at_every_cut():
     from packing_agent.prompts import StreamCleaner, clean_text
-    text = '## Kết quả\n* Dạ, mã là **Tai nghe** (SKU: HD-1001) ạ.\n* Anh/chị ạ, còn __25__ cái ạ\nHết ạ'
-    for size in (1, 2, 3, 5, 8):  # pieces of every length: "**", "##" and "ạ" get cut in every possible place
+    texts = ['## Kết quả\n* Dạ, mã là **Tai nghe** (SKU: HD-1001) ạ.\n* Anh/chị ạ, còn __25__ cái ạ\nHết ạ',
+             'Dạ vâng, ạ. Còn 3 cái tai nghe trong kho nhé',   # ", ạ." removes the comma already streamed
+             'Đủ hàng  ạ. Anh đóng thùng nha']                  # "  ạ." removes the spaces
+    for text, size in [(t, n) for t in texts for n in (1, 2, 3, 5, 8)]:  # pieces of every length: "**", "##" and "ạ" get cut in every possible place
         sc = StreamCleaner()
         shown = [sc.push(text[i:i + size]) for i in range(0, len(text), size)]
         for i, piece in enumerate(shown):
             assert '*' not in piece and '#' not in piece, (size, i, piece)
         assert ''.join(shown) + sc.flush() == clean_text(text)
+        assert len(''.join(shown)) >= len(clean_text(text)) - 12, (size, shown)  # the stream never goes silent
 
 
 def test_middleware_cleans_stored_answer():

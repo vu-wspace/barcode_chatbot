@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test": "node core.test.js && playwright test",
-    "test:gate": "set GATE_URL=http://127.0.0.1:8080&& playwright test e2e/gate.spec.js"
+    "test:gate": "node -e \"process.env.GATE_URL=process.env.GATE_URL||'http://127.0.0.1:8080';require('child_process').execSync('npx playwright test e2e/gate.spec.js',{stdio:'inherit'})\""
   },
   "devDependencies": {
     "@playwright/test": "1.64.1"

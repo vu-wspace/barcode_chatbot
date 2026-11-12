@@ -20,7 +20,13 @@ test.beforeEach(async ({ page, request }) => {
         // camera frames: whatever window.__cam says is in view; uploaded images: the next queued value
         // window.__cam may list several codes in view; window.__hang makes the next call never settle
         if (window.__hang) { window.__hang = false; return new Promise(() => {}); }
-        const v = src instanceof HTMLVideoElement ? [].concat(window.__cam || []).map((value) => ({ value, format: 'ean_13' }))
+        // window.__camOnly = 'half': the code is readable only in the half-size retry frame (like a noisy dim frame)
+        if (src instanceof HTMLVideoElement) window.__plainReads = (window.__plainReads || 0) + 1;
+        if (src instanceof HTMLCanvasElement) window.__retryReads = (window.__retryReads || 0) + 1;
+        const cam = () => [].concat(window.__cam || []).map((value) => ({ value, format: 'ean_13' }));
+        const half = src instanceof HTMLCanvasElement && src.width === Math.round(document.getElementById('video').videoWidth / 2);
+        const v = src instanceof HTMLVideoElement ? (window.__camOnly ? [] : cam())
+          : src instanceof HTMLCanvasElement ? (window.__camOnly === 'half' && half ? cam() : [])
           : [].concat(window.__codes.shift() || []);
         return Promise.resolve(v.map((c) => ({ rawValue: c.value, format: c.format, boundingBox: { x: 0, y: 0, width: 400, height: 100 } })));
       }
@@ -340,4 +346,69 @@ test('camera: a stuck decoder call does not stop scanning, an ended camera is re
   await page.evaluate(() => document.getElementById('video').srcObject.getVideoTracks()[0].dispatchEvent(new Event('ended')));
   await expect(page.locator('#toast')).toContainText('Camera bị ngắt');
   await expect(page.locator('#startBtn')).toBeVisible();
+});
+
+
+test('a code whose order lookup fails is still counted: a complete box does not stay "OK to seal"', async ({ page, request }) => {
+  await loadOrder(page);
+  for (const c of ['8935000100011', '8935000200018', '8935000300015']) { await typeCode(page, c); await page.waitForTimeout(900); }
+  await expect(page.locator('#order .verdict')).toHaveText('✓ Đủ hàng, đúng đơn. Có thể niêm phong hộp.');
+  await request.post('/__test/orders-down');
+  await uploadCode(page, 'CB-3001', 'code_128');  // one more cable, Code 128 SKU label: tried as an order id first
+  await expect(page.locator('#order .verdict')).toContainText('Lấy ra khỏi hộp: Cáp USB-C ×1');
+});
+
+test('camera: a code only the half-size retry can read is counted, and that retry goes first next time', async ({ page }) => {
+  await loadOrder(page);
+  await page.click('#startBtn');
+  await page.evaluate(() => { window.__camOnly = 'half'; window.__cam = '8935000100011'; });
+  await expect(page.locator('#order li', { hasText: 'HD-1001' })).toContainText('1/1 ✓');
+  await page.evaluate(() => { window.__plainReads = 0; });
+  await page.waitForTimeout(1500);   // held in view: every frame reads at once with the half-size frame
+  expect(await page.evaluate(() => window.__plainReads)).toBe(0);
+  await expect(page.locator('#feedback')).toContainText('Đưa ra khỏi khung');
+  await page.click('#stopBtn');
+});
+
+test('printed checklist lines start with a tick box', async ({ page }) => {
+  await loadOrder(page);
+  await typeCode(page, '8935000100011');
+  await expect(page.locator('#order li', { hasText: 'HD-1001' })).toContainText('1/1 ✓');
+  await page.emulateMedia({ media: 'print' });
+  const marks = await page.$$eval('#order li', (ls) => ls.map((l) => getComputedStyle(l, '::before').content));
+  expect(marks.sort()).toEqual(['"☐ "', '"☐ "', '"☑ "']);  // box + no-break space, not "±0"
+});
+
+
+test('camera: an empty view runs the decode retries only every 3rd frame', async ({ page }) => {
+  await page.click('#startBtn');
+  await page.evaluate(() => { window.__cam = null; window.__plainReads = 0; window.__retryReads = 0; });
+  await page.waitForTimeout(2000);
+  const { plain, retry } = await page.evaluate(() => ({ plain: window.__plainReads, retry: window.__retryReads }));
+  expect(plain).toBeGreaterThan(5);
+  expect(retry).toBeLessThanOrEqual(Math.ceil(plain / 3) * 4 + 4);   // unthrottled would be 4 per frame
+  await page.click('#stopBtn');
+});
+
+test('chat checklist card: hidden from screen readers, moved down once per scan, before that scan\'s AI reply', async ({ page, request }) => {
+  await scriptAI(request, { chunks: [sse('done', { thread_id: 't', answer: 'giải thích 1', tools: [] })] },
+    { chunks: [sse('done', { thread_id: 't', answer: 'giải thích 2', tools: [] })] });
+  await loadOrder(page);
+  const card = page.locator('#chat .msg.checklist');
+  await expect(card).toHaveAttribute('aria-hidden', 'true');
+  await typeCode(page, '8935000100011');
+  await expect(page.locator('#chat .msg.ai').last()).toHaveText('giải thích 1');
+  await page.waitForTimeout(900);
+  await typeCode(page, '8935000200018');
+  await expect(page.locator('#chat .msg.ai').last()).toHaveText('giải thích 2');  // the card moved below scan 1's reply
+  const order = await page.$$eval('#chat .msg', (ms) => ms.map((m) => m.classList.contains('checklist') ? 'card' : m.classList.contains('ai') ? 'ai' : 'me'));
+  expect(order.slice(-3)).toEqual(['card', 'me', 'ai']);
+});
+
+test('SSE reset drops the text streamed so far', async ({ page, request }) => {
+  await scriptAI(request, { chunks: [sse('token', { text: 'Dạ đang ' }), sse('reset', {}), sse('token', { text: 'Dạ ok' }),
+  ], hang: true });  // no "done": what shows is the streamed text alone
+  await page.fill('#chatInput', 'hi');
+  await page.press('#chatInput', 'Enter');
+  await expect(page.locator('.msg.ai').last()).toHaveText('Dạ ok');
 });

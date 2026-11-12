@@ -4,13 +4,14 @@ import logging
 import time
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.errors import GraphBubbleUp
-from packing_agent.llm import is_daily_limit, is_permanent_error, is_rate_limited, model_name
+from packing_agent.llm import is_daily_limit, is_permanent_error, is_rate_limited, is_timeout, model_name
 
 log = logging.getLogger('uvicorn.error')
 
 MINUTE_COOLDOWN_S = 60     # vượt giới hạn theo phút: bỏ qua model 1 phút
 DAILY_COOLDOWN_S = 3600    # hết quota ngày: bỏ qua 1 giờ rồi thử lại (không biết chính xác giờ reset của từng hãng)
 SSL_COOLDOWN_S = 600       # lỗi chứng chỉ (mạng có SSL inspection) không tự hết như mất mạng: bỏ qua 10 phút
+TIMEOUT_COOLDOWN_S = 120  # treo/quá chậm: bỏ qua 2 phút, các câu sau không phải cùng chờ hết hạn rồi lỗi 504
 PERMANENT_COOLDOWN_S = 3600  # sai tên model, sai/hết hạn key, không có quyền: thử lại mỗi câu là phí, bỏ qua 1 giờ
 
 class FallbackMiddleware(AgentMiddleware):
@@ -32,6 +33,9 @@ class FallbackMiddleware(AgentMiddleware):
             wait = DAILY_COOLDOWN_S if is_daily_limit(e) else MINUTE_COOLDOWN_S
             self.skip_until[name] = self.clock() + wait
             log.warning('LLM %s bị giới hạn (%s), tạm bỏ qua %d phút', name, type(e).__name__, wait // 60)
+        elif is_timeout(e):
+            self.skip_until[name] = self.clock() + TIMEOUT_COOLDOWN_S
+            log.warning('LLM %s quá thời gian chờ, tạm bỏ qua %d phút', name, TIMEOUT_COOLDOWN_S // 60)
         elif 'CERTIFICATE_VERIFY_FAILED' in str(e):
             self.skip_until[name] = self.clock() + SSL_COOLDOWN_S
             log.warning('LLM %s lỗi chứng chỉ SSL (xem README: Mạng có SSL inspection), tạm bỏ qua %d phút',

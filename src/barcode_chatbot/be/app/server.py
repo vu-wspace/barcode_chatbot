@@ -22,6 +22,8 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from app import seed_orders
+
 load_dotenv()
 HERE = Path(__file__).parent
 SEED_DEMO = os.getenv("SEED_DEMO", "false").lower() == "true"
@@ -142,11 +144,14 @@ def _setup(conn) -> list[str]:
         ran = migrate(conn)
         if SEED_DEMO:
             conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
+            seed_orders.insert(conn)  # 250 mock orders SO-200001..., same every time, existing ones untouched
             conn.commit()
         provision_roles(conn)
         return ran
     finally:
+        conn.rollback()  # after a failed step the transaction is aborted: unlocking in it would hide the real error
         conn.execute("SELECT pg_advisory_unlock(hashtext('barcode_chatbot.migrate'))")  # pooled sessions live on
+        conn.commit()
 
 
 # API docs only when DOCS=true (local dev): the gate blocks them too, but a trailing-slash redirect leaked the host
@@ -285,7 +290,7 @@ def check_role_passwords_not_in_sql(conn):
     secrets = [os.environ["BE_DB_PASSWORD"], os.environ["AI_DB_PASSWORD"]]
     assert rec.sent and not any(pw in stmt for pw in secrets for stmt in rec.sent), "plaintext role password in SQL"
     rows = conn.execute("SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('be_app', 'ai_app')").fetchall()
-    assert len(rows) == 2 and all(r["rolpassword"].startswith("SCRAM-SHA-256$") for r in rows), rows
+    assert len(rows) == 2 and all(r["rolpassword"].startswith("SCRAM-SHA-256$") for r in rows),         [(r["rolname"], (r["rolpassword"] or "")[:14]) for r in rows]  # never print a whole verifier (offline cracking)
 
 
 def check_concurrent_setup():

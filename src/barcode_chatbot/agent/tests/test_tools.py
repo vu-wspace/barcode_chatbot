@@ -59,3 +59,11 @@ def test_server_error_and_connection_error(be, monkeypatch):
         raise httpx.ConnectError('refused')
     monkeypatch.setattr(tools, 'client', httpx.Client(base_url='http://be', transport=httpx.MockTransport(down)))
     assert 'không kết nối được' in tools.get_product.invoke({'code': '1'})
+
+
+def test_get_order_hides_the_customer_name(monkeypatch):
+    order = {'order_id': 'SO-1', 'customer': 'Nguyễn Văn A', 'status': 'pending', 'items': []}
+    monkeypatch.setattr(tools, 'client', httpx.Client(base_url='http://be', transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=order))))
+    out = tools.get_order.invoke({'order_id': 'SO-1'})
+    assert 'Nguyễn' not in out and json.loads(out)['order_id'] == 'SO-1'

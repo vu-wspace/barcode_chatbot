@@ -1,5 +1,7 @@
+import os
 import re
 import groq
+import httpx
 from langchain_core.exceptions import (ModelAuthenticationError, ModelNotFoundError, ModelPermissionDeniedError,
                                        ModelRateLimitError)
 from langchain_openrouter import ChatOpenRouter
@@ -20,7 +22,7 @@ open_llm = ChatOpenRouter(
     max_tokens=1024,
     # ChatOpenRouter tính timeout bằng MILI GIÂY (khác ChatGroq/ChatGoogleGenerativeAI tính bằng giây).
     # Đặt 60 là 60ms -> mọi request đều timeout rồi SDK thử lại liên tục, agent treo vài phút.
-    timeout=60_000,
+    timeout=30_000,
     max_retries=RETRIES_IN_CHAIN,
 )
 
@@ -29,6 +31,7 @@ open_llm = ChatOpenRouter(
 # Phần "thinking" trả riêng trong additional_kwargs['reasoning_content'], không lẫn vào câu trả lời gửi khách.
 # ChatNVIDIA không có max_retries (SDK không tự thử lại) và tự đặt timeout 60 s cho client bên trong.
 nvidia_llm = ChatNVIDIA(
+    usage_telemetry_enabled=False,  # mặc định gửi thống kê sử dụng về NVIDIA
     model='nvidia/nemotron-3.5-super-vl-120b-a12b',
     temperature=0,
     # Giới hạn cả token suy nghĩ lẫn câu trả lời. Đo 29/10/2026 (thinking bật, 24 câu eval, sau khi thêm quy tắc 10):
@@ -47,7 +50,9 @@ google_llm = ChatGoogleGenerativeAI(
     model='gemini-3.1-flash-lite',
     temperature=0,
     max_output_tokens=1024,  # trần chi phí mỗi lần gọi; câu trả lời thực tế dưới 300 token
-    timeout=60,
+    # Model chính: 20 s x 2 lần thử = tối đa 40 s, còn ~80 s của TURN_DEADLINE (120 s) cho model dự phòng.
+    # Đo 12/11/2026: chậm nhất 4.5 s, nên 20 s chỉ cắt khi model thật sự treo.
+    timeout=20,
     max_retries=RETRIES_IN_CHAIN,
 )
 
@@ -75,8 +80,14 @@ groq_llm = ChatGroq(
 #   OpenRouter nemotron-3-ultra 5/5, trung vị 4.8-5.5 s (có lần 33 s) | NVIDIA nemotron-3.5-super 5/5, 5-6 s (chậm nhất 25 s)
 #   gemini-3.5-flash-lite 5/5, 6.1 s | Groq qwen3.8 4/5 (1 lần lỗi gọi tool), 1.1 s nhưng quota token/phút nhỏ -> cuối
 MAIN_LLM = google_llm
-# Model chính hỏng/hết quota thì thử lần lượt các model này (xem fallback.py).
-FALLBACK_LLMS = [open_llm, nvidia_llm, google_llm_alt, groq_llm]
+def _has_key(var: str) -> bool:
+    return os.getenv(var, '') not in ('', 'unused')
+
+
+# Model chính hỏng/hết quota thì thử lần lượt các model này (xem fallback.py). Hãng không có key thì bỏ hẳn khỏi
+# chuỗi: thư viện NVIDIA vẫn gửi request (cả hội thoại) khi thiếu key, chỉ in cảnh báo.
+FALLBACK_LLMS = [m for m, var in [(open_llm, 'OPENROUTER_API_KEY'), (nvidia_llm, 'NVIDIA_API_KEY'),
+                                  (google_llm_alt, 'GOOGLE_API_KEY'), (groq_llm, 'GROQ_API_KEY')] if _has_key(var)]
 
 def model_name(llm) -> str:
     return getattr(llm, 'model', None) or getattr(llm, 'model_name', None) or type(llm).__name__
@@ -100,6 +111,12 @@ def is_rate_limited(e: Exception) -> bool:
     body = e.body if isinstance(e.body, dict) else {}
     err = body.get('error')
     return (err if isinstance(err, dict) else body).get('code') == 'rate_limit_exceeded'
+
+def is_timeout(e: Exception) -> bool:
+    # httpx (OpenRouter, Gemini, Groq), asyncio/aiohttp (NVIDIA), lỗi riêng của SDK (APITimeoutError...)
+    return (isinstance(e, (TimeoutError, httpx.TimeoutException)) or 'Timeout' in type(e).__name__
+            or nvidia_status(e) == 504)
+
 
 def is_daily_limit(e: Exception) -> bool:
     # Hết quota NGÀY (OpenRouter: free-models-per-day, Gemini: ...PerDay...): chờ vài phút cũng vô ích

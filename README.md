@@ -29,7 +29,8 @@ lời câu hỏi về sản phẩm và đơn hàng.
   tải ảnh, hoặc nhập tay. Mã EAN/UPC phải đúng số kiểm tra GS1 và được đọc trùng 3 lần trong 1,5 s mới được nhận.
 - **Camera ổn định** (đo bằng video giả lập 15 điều kiện, xem [Kiểm thử](#kiểm-thử)):
   - Khung hình đọc thường không ra thì thử lại theo 4 cách: thu nhỏ một nửa (đỡ nhiễu khi tối), tăng tương phản (ảnh mờ),
-    xoay ±45° (mã cầm chéo). Cách vừa thành công được thử trước ở khung sau. Tự lấy nét liên tục nếu camera hỗ trợ.
+    xoay ±45° (mã cầm chéo). Cách vừa thành công được thử trước ở khung sau. Các cách thử lại chỉ chạy khi vừa đọc được
+    mã trong 2 s, còn lại cứ 3 khung trống mới chạy 1 lần (đỡ tốn CPU khi camera để không). Tự lấy nét liên tục nếu camera hỗ trợ.
   - Món để yên chỉ đếm **một lần**. Cùng mã chỉ được đếm lại khi món đã rời khung ít nhất 0,7 s, nên hai món giống
     nhau vẫn quét liên tiếp được. Món vẫn nằm yên mà tạm không đọc được (ảnh thu nhỏ 32×24 của khung không đổi)
     không bị coi là đã lấy ra.
@@ -43,12 +44,12 @@ lời câu hỏi về sản phẩm và đơn hàng.
 - **Checklist đơn, cập nhật theo từng lần quét:**
   - Khung "Đơn": từng sản phẩm đã quét/cần (✓ khi đủ), khung kết quả xanh hoặc đỏ (còn thiếu, cần lấy ra, mã không có trong kho).
   - Khung chat: thẻ "📦 Checklist đơn" với cùng nội dung, sửa tại chỗ và dời xuống cuối sau mỗi lần quét; mỗi đơn một thẻ,
-    thẻ của đơn trước giữ lại tình trạng lúc chuyển đơn.
+    thẻ của đơn trước giữ lại tình trạng lúc chuyển đơn. Thẻ ẩn với trình đọc màn hình (khung Đơn đã đọc kết quả).
   - Nút "In checklist": in riêng danh sách đơn (nền trắng chữ đen), mỗi dòng có ô ☐ để đánh dấu tay, dòng đã đủ in ☑.
 - **Trợ lý AI (tiếng Việt):** câu trả lời stream theo thời gian thực (SSE). AI dùng 4 tool gọi API của BE:
   `get_product`, `search_products`, `get_order`, `verify_order`. Lịch sử hội thoại lưu trong Postgres.
 - **Ổn định:** hủy lượt khi client ngắt kết nối, giới hạn thời gian mỗi lượt, mỗi hội thoại chạy từng lượt một
-  (khóa cả trong process và trong Postgres), thử lại không chạy lặp, chuỗi model dự phòng khi model chính lỗi (model vừa bị giới hạn được tạm bỏ qua).
+  (khóa cả trong process và trong Postgres), thử lại không chạy lặp, chuỗi model dự phòng khi model chính lỗi hoặc treo (model chính chờ tối đa 20 s; model vừa bị giới hạn hoặc quá thời gian được tạm bỏ qua).
 
 ## Kiến trúc
 
@@ -208,6 +209,9 @@ Mở http://localhost:8080, quét tem hoặc nhập đơn `SO-104587`, rồi qu�
 
 Dữ liệu mẫu (`be/app/seed.sql`): 7 sản phẩm, 3 đơn `SO-104587` (3 sản phẩm), `SO-104588` (chuột ×2, Salonpas ×3)
 và `X55277605433` (Salonpas ×1, vở ClassMate ×3, chuyển từ hệ thống `barcode_cv` cũ).
+Thêm 250 đơn giả `SO-200001`…`SO-200250` (`be/app/seed_orders.py`): mỗi đơn 2–5 sản phẩm còn hàng, số lượng 1–4,
+tên khách giả. Seed cố định nên lần nào cũng ra cùng dữ liệu; đơn đã có (kể cả đã sửa) không bị ghi đè. Tạo lại:
+`cd src/barcode_chatbot/be && uv run python -m app.seed_orders --clean` (thêm `--count`, `--seed`, `--sql-out file.sql` nếu cần).
 
 > Mạng có SSL inspection (proxy công ty): đặt chứng chỉ CA (`*.crt`) vào `src/barcode_chatbot/agent/certs/` rồi build lại `ai`.
 > Thư mục này bị git bỏ qua.
@@ -221,9 +225,9 @@ và `X55277605433` (Salonpas ×1, vở ClassMate ×3, chuyển từ hệ thống
 | `AI_DB_PASSWORD` | ✓ | migrate, ai | Mật khẩu role `ai_app`. Chỉ dùng chữ và số |
 | `OPENROUTER_API_KEY` | ✓ | ai | Model dự phòng đầu tiên |
 | `GOOGLE_API_KEY` | ✓ | ai | Gemini 3.1: model chính; Gemini 3.5: dự phòng |
-| `NVIDIA_API_KEY` | | ai | NVIDIA, model dự phòng thứ 2. Thiếu key thì model này bị bỏ qua 1 giờ mỗi lần lỗi |
-| `GROQ_API_KEY` | | ai | Groq, model dự phòng cuối cùng |
-| `LANGSMITH_API_KEY`, `LANGSMITH_TRACING`, `LANGSMITH_PROJECT` | | ai | Tracing. `true` sẽ gửi cả hội thoại (có tên khách) lên LangSmith |
+| `NVIDIA_API_KEY` | | ai | NVIDIA, model dự phòng thứ 2. Để trống thì NVIDIA bị bỏ khỏi chuỗi dự phòng (không gửi gì tới NVIDIA) |
+| `GROQ_API_KEY` | | ai | Groq, model dự phòng cuối cùng. Để trống hoặc `unused` thì bị bỏ khỏi chuỗi |
+| `LANGSMITH_API_KEY`, `LANGSMITH_TRACING`, `LANGSMITH_PROJECT` | | ai | Tracing. `true` sẽ gửi cả hội thoại lên LangSmith |
 | `SEED_DEMO` | | migrate | `true` (mặc định) nạp dữ liệu mẫu; không ghi đè dòng đã sửa |
 | `GATE_PORT` | | gate | Cổng trên máy, mặc định `8080` |
 | `DATABASE_URL` | | chạy BE ngoài Docker | Dùng `127.0.0.1:5433`, không dùng `localhost` |
@@ -262,6 +266,7 @@ Phản hồi là `text/event-stream`:
 | `tool` | `{name}` | Agent bắt đầu gọi một tool |
 | `token` | `{text}` | Một đoạn câu trả lời, chỉ để hiển thị dần. Đã bỏ markdown và "ạ" cuối câu; chữ cuối cùng được giữ lại tới mảnh sau để không lộ `**` hay "ạ" bị cắt đôi |
 | `done` | `{thread_id, answer, tools}` | Câu trả lời chính thức; thay toàn bộ text đã stream |
+| `reset` | `{}` | Bỏ chữ đã stream: model trước lỗi giữa chừng (model dự phòng trả lời lại) hoặc chữ trước khi gọi tool |
 | `error` | `{status, detail}` | 409 hội thoại đang bận · 429 quá tải · 500 lỗi lạ · 502 lỗi model · 503 bận hoặc lỗi DB · 504 quá 120 s |
 
 Giới hạn thời gian các lớp: một lượt 120 s; chờ lượt trước 20 s; trang bỏ cuộc sau 170 s hoặc khi 45 s không nhận được gì;
@@ -277,17 +282,18 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 | Gateway | Rate limit `/ai/` (30/phút, burst 20); chuyển nguyên đường dẫn đã mã hóa (không giải mã `%2F`/`..`); CSP, `X-Frame-Options`, `nosniff`, `Referrer-Policy`; ẩn phiên bản nginx; chặn `/docs` và `openapi.json`; ngắt request có Host lạ |
 | Secret | `.env` và `certs/*.crt` bị git bỏ qua; image agent chỉ nhận `*.crt`, không bao giờ nhận khóa riêng; container chỉ nhận biến cần dùng |
 | Trang | Mọi nội dung hiển thị đều được escape; câu trả lời AI hiển thị bằng `textContent` (dấu markdown `**`, `#`, `*` bị agent bỏ trước khi gửi); CSV xuất ra được chặn chèn công thức |
+| Dữ liệu gửi LLM | Tool `get_order` bỏ tên khách trước khi đưa cho model (tối đa 5 hãng LLM nhận hội thoại); tên khách chỉ hiện trên màn hình. Hãng không có key thì không nằm trong chuỗi dự phòng. Lỗi của hãng chỉ ghi 200 ký tự đầu vào log. Telemetry của thư viện NVIDIA tắt |
 | Chi phí LLM | Rate limit, tối đa 8 lượt chạy cùng lúc, Gemini `max_output_tokens=1024`, NVIDIA `max_completion_tokens=4096`, Groq `max_tokens=512`. Nên đặt thêm giới hạn chi tiêu trên dashboard của nhà cung cấp |
 
 ## Kiểm thử
 
 | Bộ test | Lệnh | Cần |
 |---|---|---|
-| Agent (53 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
+| Agent (73 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
 | Agent với Postgres | `TEST_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5433/barcode_chatbot uv run pytest` | DB đang chạy; dùng schema tạm rồi xóa |
 | BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test) |
 | Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |
-| Trang: logic quét + E2E Playwright (21 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
+| Trang: logic quét + E2E Playwright (27 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
 
 Phạm vi test logic quét (`core.test.js`): số kiểm tra GS1, đồng thuận nhiều khung hình, chống đếm trùng (món để yên,
 món rời khung rồi quay lại, nhiều mã trong khung theo thứ tự bất kỳ, món nằm yên mà tạm không đọc được).

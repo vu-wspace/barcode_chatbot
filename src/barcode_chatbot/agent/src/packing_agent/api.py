@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from packing_agent import tools
 from packing_agent.agent import build_agent
-from packing_agent.llm import is_rate_limited  # one rule for the fallback chain and the HTTP status
+from packing_agent.llm import is_rate_limited, nvidia_status  # one rule for the fallback chain and the HTTP status
 from packing_agent.prompts import StreamCleaner
 
 log = logging.getLogger('uvicorn.error')
@@ -67,11 +67,12 @@ def to_turn_error(e: Exception) -> TurnError:
     if isinstance(e, TimeoutError):
         return TurnError(504, 'Trợ lý trả lời quá lâu, anh/chị vui lòng thử lại.')
     if is_rate_limited(e):
-        log.warning('LLM rate limit: %s', e)  # ghi loại giới hạn (token/phút, token/ngày...) để biết chờ hay nâng gói
+        log.warning('LLM rate limit: %s', str(e)[:200])  # loại giới hạn (token/phút, /ngày...) để biết chờ hay nâng gói
         return TurnError(429, 'Hệ thống đang quá tải, anh/chị vui lòng thử lại sau ít phút.')
     if isinstance(e, (groq.APIError, openrouter_errors.OpenRouterError, openrouter_errors.NoResponseError,
-                      ModelError, GraphRecursionError)):
-        log.exception('Lỗi khi chạy agent')
+                      ModelError, GraphRecursionError)) or nvidia_status(e):
+        # không log.exception: lỗi của hãng có thể trích lại prompt (có dữ liệu đơn hàng)
+        log.error('Lỗi khi chạy agent: %s: %s', type(e).__name__, str(e)[:200])
         return TurnError(502, f'Không tạo được câu trả lời ({type(e).__name__}).')
     if isinstance(e, psycopg.Error):
         log.exception('Lỗi DB lịch sử hội thoại')
@@ -247,8 +248,10 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                             await out.put(sse('tool', {'name': tc['name']}))
                     if msg.text:  # the stored answer is cleaned by the middleware; clean the live pieces too
                         if msg.id != msg_id:
-                            if tail := cleaner.flush():
-                                await out.put(sse('token', {'text': tail}))
+                            # A new model message: the earlier one was text before a tool call, or a model that failed
+                            # mid-answer (the fallback answers again). Neither is the answer: the page drops it.
+                            if cleaner.sent:
+                                await out.put(sse('reset', {}))
                             cleaner, msg_id = StreamCleaner(), msg.id
                         if piece := cleaner.push(msg.text):
                             await out.put(sse('token', {'text': piece}))

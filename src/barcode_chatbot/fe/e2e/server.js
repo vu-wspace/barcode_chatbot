@@ -22,6 +22,7 @@ const ORDERS = {
 let aiScript = [];   // [{ chunks: [string], delayMs, hang }]
 let aiRequests = []; // bodies of POST /ai/chat
 let aiResults = {};  // request_id -> answer, like the agent's retry cache
+let ordersDown = false; // /__test/orders-down: GET /api/orders/{id} answers 500
 
 const skuOf = (code) => Object.values(PRODUCTS).find((p) => p.barcode === code || p.sku === code);
 const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -68,7 +69,8 @@ http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': file.endsWith('.js') ? 'text/javascript' : 'text/html; charset=utf-8' });
       return res.end(fs.readFileSync(path.join(ROOT, file)));
     }
-    if (p === '/__test/reset') { aiScript = []; aiRequests = []; aiResults = {}; return json(res, 200, {}); }
+    if (p === '/__test/reset') { aiScript = []; aiRequests = []; aiResults = {}; ordersDown = false; return json(res, 200, {}); }
+    if (p === '/__test/orders-down') { ordersDown = true; return json(res, 200, {}); }
     if (p === '/__test/ai') { aiScript.push(...(await readBody(req)).steps); return json(res, 200, {}); }
     if (p === '/__test/requests') return json(res, 200, aiRequests);
     if (p === '/ai/chat' && req.method === 'POST') return aiChat(req, res);
@@ -79,6 +81,7 @@ http.createServer(async (req, res) => {
       return prod ? json(res, 200, prod) : json(res, 404, { detail: 'unknown product' });
     }
     if ((m = p.match(/^\/api\/orders\/([^/]+)$/))) {
+      if (ordersDown) return json(res, 500, { detail: 'db down' });
       const o = ORDERS[decodeURIComponent(m[1])];
       return o ? json(res, 200, orderView(o)) : json(res, 404, { detail: 'unknown order' });
     }

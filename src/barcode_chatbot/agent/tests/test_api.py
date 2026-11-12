@@ -118,6 +118,8 @@ def _openrouter(E, cls, data_cls, code):
     (lambda: (E := __import__('openrouter.errors', fromlist=['x'])) and _openrouter(E, E.TooManyRequestsResponseError, E.TooManyRequestsResponseErrorData, 429), 429),
     (lambda: (E := __import__('openrouter.errors', fromlist=['x'])) and _openrouter(E, E.InternalServerResponseError, E.InternalServerResponseErrorData, 500), 502),
     (lambda: __import__('openrouter.errors', fromlist=['x']).NoResponseError(), 502),
+    (lambda: Exception('[429] Too Many Requests'), 429),   # NVIDIA: bare Exception, same rule as the chain
+    (lambda: Exception('[500] Internal Server Error'), 502),
     (lambda: RuntimeError('bug'), 500),  # lỗi lạ vẫn ra event error, không làm đứt stream
 ])
 def test_errors_become_error_events(client, monkeypatch, make_error, status):
@@ -255,3 +257,36 @@ def test_agent_docs_off_by_default(client):
 
 def test_health(client):
     assert client.get('/health').json() == {'status': 'ok'}
+
+
+def test_chat_answers_with_the_fallback_when_the_main_model_is_rate_limited(client, monkeypatch):
+    # astream -> awrap_model_call -> request.override(model=fallback): the production path with fallback on
+    main = Raising(messages=iter([]), disable_streaming=True)
+    main.error = groq.RateLimitError('rl', response=httpx.Response(429, request=httpx.Request('POST', 'https://g')), body=None)
+    monkeypatch.setattr(agent_module, 'MAIN_LLM', main)
+    monkeypatch.setattr(agent_module, 'FALLBACK_LLMS', [model(AIMessage('Dạ, model dự phòng trả lời ạ.'))])
+    api.app.state.agent = agent_module.build_agent(checkpointer=api.app.state.saver)
+    events = chat(client, message='hi', thread_id=str(uuid.uuid4()), request_id=str(uuid.uuid4()))
+    assert [e for e, _ in events if e == 'error'] == []
+    assert dict(events)['done']['answer'] == 'Dạ, model dự phòng trả lời.'
+
+
+class FailsMidStream(FakeModel):
+    def _stream(self, *a, **kw):
+        from langchain_core.outputs import ChatGenerationChunk
+        from langchain_core.messages import AIMessageChunk
+        yield ChatGenerationChunk(message=AIMessageChunk(content='Dạ đang tra '))
+        yield ChatGenerationChunk(message=AIMessageChunk(content='cứu cho '))
+        raise groq.RateLimitError('rl', response=httpx.Response(429, request=httpx.Request('POST', 'https://g')), body=None)
+
+
+def test_partial_text_of_a_failed_model_is_reset_before_the_fallback_answer(client, monkeypatch):
+    monkeypatch.setattr(agent_module, 'MAIN_LLM', FailsMidStream(messages=iter([])))
+    monkeypatch.setattr(agent_module, 'FALLBACK_LLMS', [model(AIMessage('Dạ, còn 25 cái nha.'), stream=True)])
+    api.app.state.agent = agent_module.build_agent(checkpointer=api.app.state.saver)
+    events = chat(client, message='hi', thread_id=str(uuid.uuid4()), request_id=str(uuid.uuid4()))
+    names = [e for e, _ in events]
+    assert 'reset' in names and 'error' not in names
+    after = names.index('reset')
+    shown = ''.join(d['text'] for e, d in events[after:] if e == 'token')
+    assert shown == dict(events)['done']['answer'] == 'Dạ, còn 25 cái nha.'
