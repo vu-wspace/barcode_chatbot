@@ -36,7 +36,8 @@ lời câu hỏi về sản phẩm và đơn hàng.
     không bị coi là đã lấy ra.
   - Nhiều mã cùng trong khung (2 món, hoặc hộp có cả EAN và QR): mỗi món đếm một lần, món mới được đọc dù món cũ còn trong khung.
   - Camera bị ngắt (rút USB, app khác chiếm) thì báo lỗi; lệnh giải mã treo quá 3 s thì bỏ qua và quét tiếp.
-  - Khi đang mở đơn, sau mỗi lần quét chỉ dừng 1,2 s (ngoài đơn: 5 s, hoặc 1,2 s ở chế độ quét liên tục).
+  - Sau mỗi lần quét chỉ dừng 1,2 s, dù có mở đơn hay không (trong lúc dừng camera không nhìn gì, nên dừng lâu sẽ bỏ sót
+    món kế tiếp và không thấy món vừa quét đã được lấy ra).
 - **Tra sản phẩm:** tên, SKU, danh mục, giá, tồn kho. Mã EAN-13 có số 0 đầu, UPC-A 12 số và GTIN-14 được coi là cùng một mã.
 - **Mở đơn:** quét tem mã đơn (Code 128, QR…) hoặc nhập tay. Tem đơn chỉ được đọc khi chưa mở đơn nào hoặc đơn đang
   mở đã đủ hàng, nên giữa chừng mọi mã quét đều được đếm vào đơn (quét nhầm tem đơn khác sẽ hiện là mã không có trong
@@ -305,7 +306,7 @@ trước 20 s; trang bỏ cuộc sau 170 s hoặc khi 45 s không nhận đượ
 | BE: đơn giả (6 test, không cần DB) | `cd src/barcode_chatbot/be && uv run pytest` | Chỉ cần `uv` |
 | BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test, tạo rồi xóa DB tạm) |
 | Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |
-| Trang: logic quét + E2E Playwright (29 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
+| Trang: logic quét + E2E Playwright (30 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
 
 Phạm vi self-check của BE: API qua `TestClient`, migration (mỗi file đúng 1 lần), 3 lần `migrate` chạy cùng lúc trên DB
 trống, bước khởi tạo lỗi giữa chừng vẫn báo đúng lỗi và nhả khóa `migrate`, mật khẩu role không nằm trong câu SQL, quyền

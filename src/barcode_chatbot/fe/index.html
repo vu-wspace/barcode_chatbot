@@ -107,7 +107,6 @@
           <button id="flipBtn" title="Flip camera" aria-label="Flip camera">🔄</button>
           <button id="torchBtn" title="Toggle light" aria-label="Toggle light" aria-pressed="false" hidden>🔦</button>
           <button id="beepBtn" title="Sound on scan" aria-label="Sound on scan" aria-pressed="true" class="on">🔊</button>
-          <button id="batchBtn" title="Batch mode (short pause between scans)" aria-label="Batch mode" aria-pressed="false">⚡</button>
         </div>
         <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" aria-label="Zoom" hidden>
       </div>
@@ -170,12 +169,12 @@
   var CFG = {
     polyfill: 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.3/dist/iife/polyfill.min.js',
     formats: ['qr_code','aztec','codabar','code_39','code_93','code_128','data_matrix','ean_8','ean_13','itf','pdf417','upc_a','upc_e'],
-    detectIntervalMs: 80, detectTimeoutMs: 3000, rearmGoneMs: 700, requiredAgreement: 3, agreeWindowMs: 1500, pauseMs: 5000, batchPauseMs: 1200,
+    detectIntervalMs: 80, detectTimeoutMs: 3000, rearmGoneMs: 700, requiredAgreement: 3, agreeWindowMs: 1500, pauseMs: 1200,
     maxHistory: 100, historyKey: 'scanner_history_v1', settingsKey: 'scanner_settings_v1',
   };
   var NAMES = { qr_code:'QR Code', aztec:'Aztec', codabar:'Codabar', code_39:'Code 39', code_93:'Code 93', code_128:'Code 128', data_matrix:'Data Matrix', ean_8:'EAN-8', ean_13:'EAN-13', itf:'ITF', pdf417:'PDF417', upc_a:'UPC-A', upc_e:'UPC-E', asin:'ASIN', unknown:'Unknown' };
   var $ = function (id) { return document.getElementById(id); };
-  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, batch: false, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: '', starting: false, camSession: 0, orderReq: 0, orderLoading: false, verdict: null, verifySeq: 0, idleFrames: 0, detectTok: 0, lastHit: 0 };
+  var S = { facing: 'environment', stream: null, track: null, scanning: false, paused: false, detector: null, lastDetect: 0, history: [], beep: true, audio: null, torch: false, pauseTimer: null, order: null, scans: [], thread: '', starting: false, camSession: 0, orderReq: 0, orderLoading: false, verdict: null, verifySeq: 0, idleFrames: 0, detectTok: 0, lastHit: 0 };
   var agree = ScanCore.createAgreement(CFG.requiredAgreement, CFG.agreeWindowMs);
   var rearm = ScanCore.createRearm(CFG.rearmGoneMs); // an item left in view is counted once
 
@@ -339,7 +338,9 @@
     if (r.accepted) {
       rearm.accepted(raw);
       accept(raw, fmt, 'camera');
-      pause(S.batch || S.order ? CFG.batchPauseMs : CFG.pauseMs); // with an order open the re-arm rule stops double counts
+      // Short pause, order or not: the re-arm rule already stops double counts, and the camera sees nothing while
+      // paused, so a long pause missed the next item and hid that the last one had been taken away (counted only once)
+      pause(CFG.pauseMs);
     } else {
       var small = code.boundingBox && code.boundingBox.width / v.videoWidth < 0.25;
       feedback(small ? 'Barcode detected, move a little closer' : 'Verifying, hold steady (' + r.count + '/' + CFG.requiredAgreement + ')', 'warn');
@@ -348,7 +349,7 @@
 
   function pause(ms) {
     S.paused = true; drawBox(null); $('stage').classList.add('locked');
-    feedback(ms === CFG.batchPauseMs ? 'Scanned, keep going' : 'Scanned. Paused for ' + ms / 1000 + ' seconds', 'ok');
+    feedback('Scanned, keep going', 'ok');
     clearTimeout(S.pauseTimer);
     S.pauseTimer = setTimeout(function () {
       S.paused = false; agree.reset(); $('stage').classList.remove('locked');
@@ -428,7 +429,7 @@
   // --- results + history ---
   function accept(raw, fmt, source) {
     var n = ScanCore.normalizeCode(raw, fmt), value = n.value, format = n.format || ScanCore.formatFromValue(value), now = Date.now();
-    // Drops only double-fires of one read. Must stay below the batch pause (1200 ms) + agreement time, else a second
+    // Drops only double-fires of one read. Must stay below the scan pause (1200 ms) + agreement time, else a second
     // unit of the same product is not counted.
     if (S.last && S.last.value === value && now - S.last.ts < 800) return;
     S.last = { value: value, ts: now };
@@ -712,8 +713,7 @@
   $('torchBtn').onclick = function () { S.torch = !S.torch; setToggle(this, S.torch); applyConstraint({ torch: S.torch }); };
   $('zoom').oninput = function () { applyConstraint({ zoom: parseFloat(this.value) }); };
   $('video').onclick = function () { applyConstraint({ focusMode: 'single-shot' }); };
-  $('beepBtn').onclick = function () { S.beep = !S.beep; this.textContent = S.beep ? '🔊' : '🔇'; setToggle(this, S.beep); save(CFG.settingsKey, { beep: S.beep, batch: S.batch }); };
-  $('batchBtn').onclick = function () { S.batch = !S.batch; setToggle(this, S.batch); save(CFG.settingsKey, { beep: S.beep, batch: S.batch }); };
+  $('beepBtn').onclick = function () { S.beep = !S.beep; this.textContent = S.beep ? '🔊' : '🔇'; setToggle(this, S.beep); save(CFG.settingsKey, { beep: S.beep }); };
   $('manualBtn').onclick = manual;
   $('manual').onkeydown = function (e) { if (e.key === 'Enter') manual(); };
   var drop = $('drop');
@@ -743,7 +743,6 @@
   S.history = load(CFG.historyKey, []);
   var st = load(CFG.settingsKey, {});
   if (st.beep === false) { S.beep = false; $('beepBtn').textContent = '🔇'; setToggle($('beepBtn'), false); }
-  if (st.batch) { S.batch = true; setToggle($('batchBtn'), true); }
   renderHistory();
   ensureDetector().catch(function () {}); // warm up the WASM decoder so the first scan is fast
 })();

@@ -221,7 +221,6 @@ test('camera: an item left in view is counted once, a second unit after it left 
   test.setTimeout(60000);
   await loadOrder(page);
   await page.click('#startBtn');
-  await page.click('#batchBtn');                       // batch mode: 1.2 s pause, the hardest case
   await page.evaluate(() => { window.__cam = '8935000100011'; });
   const row = page.locator('#order li', { hasText: 'HD-1001' });
   await expect(row).toContainText('1/1 ✓', { timeout: 15000 });
@@ -443,5 +442,23 @@ test('camera: right after a read the decode retries run on every frame, then fal
   await page.waitForTimeout(1200);
   const cold = await page.evaluate(() => ({ p: window.__plainReads, r: window.__retryReads }));
   expect(cold.r).toBeLessThanOrEqual(Math.ceil(cold.p / 3) * 4 + 4);
+  await page.click('#stopBtn');
+});
+
+test('camera without an order: the next item and the same item shown again are both read (no long pause)', async ({ page }) => {
+  await page.click('#startBtn');
+  const seen = () => page.$$eval('#hist li', (ls) => ls.length);
+  await page.evaluate(() => { window.__cam = '8935000100011'; });
+  await expect.poll(seen).toBe(1);
+  await page.evaluate(() => { window.__cam = null; });
+  await page.waitForTimeout(1500);
+  await page.evaluate(() => { window.__cam = '8935000200018'; });   // next item, 2 s after the first: still in the old 5 s pause
+  await expect.poll(seen, { timeout: 4000 }).toBe(2);
+  await page.evaluate(() => { window.__cam = null; });
+  await page.waitForTimeout(2500);  // 1.2 s pause (camera sees nothing) + well over the 0.7 s seen-gone rule
+  await page.evaluate(() => { window.__cam = '8935000200018'; });   // the same product again after it left the frame
+  await expect.poll(seen, { timeout: 4000 }).toBe(3);
+  await page.waitForTimeout(3000);                                    // held still: not counted again
+  expect(await seen()).toBe(3);
   await page.click('#stopBtn');
 });
