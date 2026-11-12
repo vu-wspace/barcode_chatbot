@@ -64,7 +64,7 @@ flowchart LR
         DB[("Postgres 18<br/>public: products, orders, order_items<br/>agent: checkpoints (lịch sử chat)")]
     end
 
-    LLM["OpenRouter (model chính)<br/>dự phòng: NVIDIA → Gemini ×2 → Groq"]
+    LLM["Gemini 3.1 Flash Lite (model chính)<br/>dự phòng: OpenRouter → NVIDIA → Gemini 3.5 → Groq"]
 
     U -- "HTML, /api/*, /ai/chat" --> G
     G -- "/api/*" --> BE
@@ -127,7 +127,7 @@ sequenceDiagram
     participant API as ai: /chat
     participant LG as LangGraph agent
     participant BE as be
-    participant LLM as OpenRouter / dự phòng
+    participant LLM as Gemini / dự phòng
     participant PG as Postgres (schema agent)
 
     FE->>G: POST /ai/chat {message, thread_id, request_id}
@@ -189,13 +189,13 @@ Nếu một migration lỗi, `migrate` thoát với mã khác 0 và `be`, `ai` k
         │   ├── tools.py        # 4 tool gọi API của BE
         │   ├── prompts.py      # system prompt tiếng Việt
         │   ├── history.py      # chỉ gửi 4 lượt gần nhất cho model
-        │   └── llm.py          # OpenRouter (chính); NVIDIA, Gemini, Gemini alt, Groq (dự phòng); phân loại lỗi
+        │   └── llm.py          # Gemini 3.1 (chính); OpenRouter, NVIDIA, Gemini 3.5, Groq (dự phòng); phân loại lỗi
         └── tests/              # pytest (+ test_postgres.py khi có TEST_DATABASE_URL)
 ```
 
 ## Cài đặt và chạy
 
-**Yêu cầu:** Docker (Compose v2), API key OpenRouter và Google (Gemini).
+**Yêu cầu:** Docker (Compose v2), API key Google (Gemini) và OpenRouter.
 Để phát triển và chạy test: `uv` (Python 3.13) và Node.js.
 
 ```bash
@@ -219,9 +219,9 @@ và `X55277605433` (Salonpas ×1, vở ClassMate ×3, chuyển từ hệ thống
 | `POSTGRES_PASSWORD` | ✓ | db, migrate | Mật khẩu superuser `postgres` |
 | `BE_DB_PASSWORD` | ✓ | migrate, be | Mật khẩu role `be_app`. Chỉ dùng chữ và số, vì nó nằm trong URL |
 | `AI_DB_PASSWORD` | ✓ | migrate, ai | Mật khẩu role `ai_app`. Chỉ dùng chữ và số |
-| `OPENROUTER_API_KEY` | ✓ | ai | Model chính |
-| `GOOGLE_API_KEY` | ✓ | ai | Gemini, 2 model dự phòng |
-| `NVIDIA_API_KEY` | | ai | NVIDIA, model dự phòng đầu tiên. Thiếu key thì model này bị bỏ qua 1 giờ mỗi lần lỗi |
+| `OPENROUTER_API_KEY` | ✓ | ai | Model dự phòng đầu tiên |
+| `GOOGLE_API_KEY` | ✓ | ai | Gemini 3.1: model chính; Gemini 3.5: dự phòng |
+| `NVIDIA_API_KEY` | | ai | NVIDIA, model dự phòng thứ 2. Thiếu key thì model này bị bỏ qua 1 giờ mỗi lần lỗi |
 | `GROQ_API_KEY` | | ai | Groq, model dự phòng cuối cùng |
 | `LANGSMITH_API_KEY`, `LANGSMITH_TRACING`, `LANGSMITH_PROJECT` | | ai | Tracing. `true` sẽ gửi cả hội thoại (có tên khách) lên LangSmith |
 | `SEED_DEMO` | | migrate | `true` (mặc định) nạp dữ liệu mẫu; không ghi đè dòng đã sửa |
@@ -260,7 +260,7 @@ Phản hồi là `text/event-stream`:
 |---|---|---|
 | `meta` | `{thread_id, request_id}` | Luôn là event đầu tiên |
 | `tool` | `{name}` | Agent bắt đầu gọi một tool |
-| `token` | `{text}` | Một đoạn câu trả lời, chỉ để hiển thị dần |
+| `token` | `{text}` | Một đoạn câu trả lời, chỉ để hiển thị dần. Đã bỏ markdown và "ạ" cuối câu; chữ cuối cùng được giữ lại tới mảnh sau để không lộ `**` hay "ạ" bị cắt đôi |
 | `done` | `{thread_id, answer, tools}` | Câu trả lời chính thức; thay toàn bộ text đã stream |
 | `error` | `{status, detail}` | 409 hội thoại đang bận · 429 quá tải · 500 lỗi lạ · 502 lỗi model · 503 bận hoặc lỗi DB · 504 quá 120 s |
 
@@ -283,7 +283,7 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 
 | Bộ test | Lệnh | Cần |
 |---|---|---|
-| Agent (52 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
+| Agent (53 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
 | Agent với Postgres | `TEST_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5433/barcode_chatbot uv run pytest` | DB đang chạy; dùng schema tạm rồi xóa |
 | BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test) |
 | Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |

@@ -53,8 +53,7 @@ google_llm = ChatGoogleGenerativeAI(
 
 # Gemini gói free tính quota riêng cho từng model -> model thứ 2 là thêm 1 phần quota khi model trên hết
 google_llm_alt = ChatGoogleGenerativeAI(
-    model='gemini-3.5-flash-lite',
-    temperature=0,
+    model='gemini-3.5-flash-lite',  # model này bỏ qua temperature (in cảnh báo nếu truyền)
     max_output_tokens=1024,
     timeout=60,
     max_retries=RETRIES_IN_CHAIN,
@@ -71,9 +70,13 @@ groq_llm = ChatGroq(
     max_tokens=512,
 )
 
+# Thứ tự đo 12/11/2026 trên 5 câu đóng gói (tra mã, kiểm đơn, hết hàng, nội dung đơn, câu ngoài lề), qua agent thật:
+#   gemini-3.1-flash-lite 5/5, trung vị 2.0-2.9 s, chậm nhất 4.5 s  -> model chính
+#   OpenRouter nemotron-3-ultra 5/5, trung vị 4.8-5.5 s (có lần 33 s) | NVIDIA nemotron-3.5-super 5/5, 5-6 s (chậm nhất 25 s)
+#   gemini-3.5-flash-lite 5/5, 6.1 s | Groq qwen3.8 4/5 (1 lần lỗi gọi tool), 1.1 s nhưng quota token/phút nhỏ -> cuối
+MAIN_LLM = google_llm
 # Model chính hỏng/hết quota thì thử lần lượt các model này (xem fallback.py).
-# Xếp theo tốc độ đo được; Groq nhanh nhưng quota token/phút nhỏ nên để cuối.
-FALLBACK_LLMS = [nvidia_llm, google_llm, google_llm_alt, groq_llm]
+FALLBACK_LLMS = [open_llm, nvidia_llm, google_llm_alt, groq_llm]
 
 def model_name(llm) -> str:
     return getattr(llm, 'model', None) or getattr(llm, 'model_name', None) or type(llm).__name__

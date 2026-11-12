@@ -3,7 +3,7 @@ from langchain.agents import create_agent
 from langgraph.types import Checkpointer
 from packing_agent.fallback import FallbackMiddleware
 from packing_agent.history import TrimHistoryMiddleware
-from packing_agent.llm import FALLBACK_LLMS, open_llm
+from packing_agent.llm import FALLBACK_LLMS, MAIN_LLM
 from packing_agent.prompts import SYSTEM_PROMPT
 from packing_agent.tools import TOOLS
 
@@ -15,7 +15,7 @@ def build_agent(checkpointer: Checkpointer = None, fallback: bool = True):
         # Model chính lỗi/hết quota thì thử lần lượt FALLBACK_LLMS, bỏ qua tạm model vừa bị giới hạn (fallback.py).
         middleware.append(FallbackMiddleware(*FALLBACK_LLMS))
     return create_agent(
-        model=open_llm,
+        model=MAIN_LLM,
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
         middleware=middleware,

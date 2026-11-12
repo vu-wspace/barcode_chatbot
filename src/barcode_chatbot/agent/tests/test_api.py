@@ -47,7 +47,7 @@ def client(monkeypatch):
 
 
 def use(monkeypatch, llm):
-    monkeypatch.setattr(agent_module, 'open_llm', llm)
+    monkeypatch.setattr(agent_module, 'MAIN_LLM', llm)
     api.app.state.agent = agent_module.build_agent(checkpointer=api.app.state.saver, fallback=False)
 
 

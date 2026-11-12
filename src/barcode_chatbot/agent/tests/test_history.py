@@ -61,6 +61,17 @@ def test_markdown_markers_removed():
     assert clean_text(keep) == keep
 
 
+def test_stream_cleaner_matches_whole_answer_at_every_cut():
+    from packing_agent.prompts import StreamCleaner, clean_text
+    text = '## Kết quả\n* Dạ, mã là **Tai nghe** (SKU: HD-1001) ạ.\n* Anh/chị ạ, còn __25__ cái ạ\nHết ạ'
+    for size in (1, 2, 3, 5, 8):  # pieces of every length: "**", "##" and "ạ" get cut in every possible place
+        sc = StreamCleaner()
+        shown = [sc.push(text[i:i + size]) for i in range(0, len(text), size)]
+        for i, piece in enumerate(shown):
+            assert '*' not in piece and '#' not in piece, (size, i, piece)
+        assert ''.join(shown) + sc.flush() == clean_text(text)
+
+
 def test_middleware_cleans_stored_answer():
     from langchain_core.messages import AIMessage
     from packing_agent.history import clean_response

@@ -52,3 +52,32 @@ _BULLET = re.compile(r'^([ \t]*)[*•][ \t]+', re.M)
 def clean_text(text: str) -> str:
     text = text.replace('**', '').replace('__', '')
     return strip_final_a(_BULLET.sub(r'\1- ', _HEADING.sub('', text)))
+
+
+# A word that can only be judged once the text after it is known: a bare "ạ" (sentence-final or not) or a lone
+# marker ("*", "##", "**" split across two pieces...).
+_UNDECIDED = re.compile(r'(?:^|\s)(?:ạ|[#*•_]+)$')
+
+
+class StreamCleaner:
+    # clean_text for an answer that arrives in pieces: re-cleans everything received so far but holds back the last,
+    # unfinished word (and an undecided one before it), so "**" cut between two pieces or "ạ" waiting for its "."
+    # never reach the screen. The joined output equals clean_text(whole answer) (test_history checks every cut).
+    def __init__(self):
+        self.raw, self.sent = '', ''
+
+    def push(self, piece: str) -> str:
+        self.raw += piece
+        safe = self.raw[:max(self.raw.rfind(' '), self.raw.rfind('\n'), self.raw.rfind('\t'), 0)]
+        while _UNDECIDED.search(safe):
+            safe = safe[:max(safe.rfind(' '), safe.rfind('\n'), safe.rfind('\t'), 0)]
+        return self._emit(clean_text(safe))
+
+    def flush(self) -> str:
+        return self._emit(clean_text(self.raw))
+
+    def _emit(self, cleaned: str) -> str:
+        if not cleaned.startswith(self.sent):
+            return ''  # cleaning changed text already shown: rare, the final "done" answer replaces it anyway
+        out, self.sent = cleaned[len(self.sent):], cleaned
+        return out

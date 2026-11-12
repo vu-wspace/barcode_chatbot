@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from packing_agent import tools
 from packing_agent.agent import build_agent
 from packing_agent.llm import is_rate_limited  # one rule for the fallback chain and the HTTP status
-from packing_agent.prompts import clean_text
+from packing_agent.prompts import StreamCleaner
 
 log = logging.getLogger('uvicorn.error')
 
@@ -235,6 +235,7 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                 await repair_dangling_tool_calls(agent, config)
                 n_before = len((await agent.aget_state(config)).values.get('messages', []))
                 sent_tools = set()
+                cleaner, msg_id = StreamCleaner(), None  # one per model call: each call's text is its own answer
                 async for msg, meta in agent.astream({'messages': [{'role': 'user', 'content': req.message}]},
                                                      config, stream_mode='messages'):
                     if meta.get('langgraph_node') != 'model':
@@ -245,7 +246,14 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                             sent_tools.add(tc.get('id'))
                             await out.put(sse('tool', {'name': tc['name']}))
                     if msg.text:  # the stored answer is cleaned by the middleware; clean the live pieces too
-                        await out.put(sse('token', {'text': clean_text(msg.text)}))
+                        if msg.id != msg_id:
+                            if tail := cleaner.flush():
+                                await out.put(sse('token', {'text': tail}))
+                            cleaner, msg_id = StreamCleaner(), msg.id
+                        if piece := cleaner.push(msg.text):
+                            await out.put(sse('token', {'text': piece}))
+                if tail := cleaner.flush():
+                    await out.put(sse('token', {'text': tail}))
                 new = (await agent.aget_state(config)).values['messages'][n_before:]
                 result = {
                     'thread_id': thread_id,

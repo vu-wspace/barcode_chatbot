@@ -17,7 +17,7 @@ class QuotaExceededModel(FakeModel):
 
 @pytest.fixture
 def models(monkeypatch):
-    monkeypatch.setattr(agent_module, 'open_llm', QuotaExceededModel(messages=iter([])))
+    monkeypatch.setattr(agent_module, 'MAIN_LLM', QuotaExceededModel(messages=iter([])))
     monkeypatch.setattr(agent_module, 'FALLBACK_LLMS', [FakeModel(messages=iter([AIMessage('Dạ, em trả lời bằng model dự phòng ạ.')]))])
 
 

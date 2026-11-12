@@ -47,7 +47,7 @@ async def make_app(*replies):
     await pool.open()
     saver = AsyncPostgresSaver(pool)
     await saver.setup()
-    agent_module.open_llm = FakeModel(messages=iter(replies), disable_streaming=True)
+    agent_module.MAIN_LLM = FakeModel(messages=iter(replies), disable_streaming=True)
     agent = agent_module.build_agent(checkpointer=saver, fallback=False)
     return SimpleNamespace(state=SimpleNamespace(agent=agent, saver=saver, pool=pool)), pool
 
