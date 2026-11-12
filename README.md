@@ -47,9 +47,14 @@ lời câu hỏi về sản phẩm và đơn hàng.
     thẻ của đơn trước giữ lại tình trạng lúc chuyển đơn. Thẻ ẩn với trình đọc màn hình (khung Đơn đã đọc kết quả).
   - Nút "In checklist": in riêng danh sách đơn (nền trắng chữ đen), mỗi dòng có ô ☐ để đánh dấu tay, dòng đã đủ in ☑.
 - **Trợ lý AI (tiếng Việt):** câu trả lời stream theo thời gian thực (SSE). AI dùng 4 tool gọi API của BE:
-  `get_product`, `search_products`, `get_order`, `verify_order`. Lịch sử hội thoại lưu trong Postgres.
+  `get_product`, `search_products`, `get_order`, `verify_order`. Lịch sử hội thoại lưu trong Postgres. AI không nhận
+  tên khách (xem [Bảo mật](#bảo-mật)): hỏi "đơn này của ai" thì AI nhờ xem trên màn hình đơn.
 - **Ổn định:** hủy lượt khi client ngắt kết nối, giới hạn thời gian mỗi lượt, mỗi hội thoại chạy từng lượt một
-  (khóa cả trong process và trong Postgres), thử lại không chạy lặp, chuỗi model dự phòng khi model chính lỗi hoặc treo (model chính chờ tối đa 15 s, không thử lại; model vừa bị giới hạn hoặc quá thời gian được tạm bỏ qua).
+  (khóa cả trong process và trong Postgres), thử lại không chạy lặp.
+- **Chuỗi model dự phòng:** Gemini 3.1 Flash Lite → OpenRouter → NVIDIA → Gemini 3.5 → Groq (`agent/.../fallback.py`).
+  Model chính chờ tối đa 15 s và không thử lại; lỗi hay treo thì chuyển ngay model kế tiếp. Model lỗi được tạm bỏ qua
+  để các câu sau không phải chờ nó: quá thời gian 2 phút, giới hạn theo phút 1 phút, hết quota ngày 1 giờ, sai key hay
+  tên model 1 giờ, lỗi chứng chỉ SSL 10 phút. Hãng không có key thì không nằm trong chuỗi.
 
 ## Kiến trúc
 
@@ -139,7 +144,8 @@ sequenceDiagram
     else Lượt mới
         API->>PG: khóa hội thoại (asyncio + pg_try_advisory_xact_lock)
         API->>LG: astream (deadline 120 s)
-        LG->>LLM: gọi model (lỗi thì chuyển model dự phòng kế tiếp)
+        LG->>LLM: gọi model (lỗi hay treo thì chuyển model dự phòng kế tiếp)
+        LG-->>FE: event: reset (nếu model đã viết chữ trước khi gọi tool, hoặc lỗi giữa chừng)
         LG-->>FE: event: tool {name}
         LG->>BE: tool gọi /products, /orders/{id}/verify...
         LG->>LLM: gọi model với kết quả tool
@@ -155,7 +161,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    DB[("db<br/>healthy")] --> M["migrate<br/>001_init, 002_gtin…<br/>seed.sql<br/>role be_app, ai_app"]
+    DB[("db<br/>healthy")] --> M["migrate<br/>001_init, 002_gtin…<br/>seed.sql (SEED_DEMO)<br/>250 đơn DEMO- (SEED_MOCK_ORDERS)<br/>role be_app, ai_app"]
     M -- "thoát với mã 0" --> BE["be"]
     M -- "thoát với mã 0" --> AI["ai<br/>tạo bảng checkpoint<br/>dọn hội thoại > 7 ngày"]
     BE --> G["gate :8080"]
@@ -178,17 +184,19 @@ Nếu một migration lỗi, `migrate` thoát với mã khác 0 và `be`, `ai` k
     │   ├── default.conf.template  # cấu hình nginx
     │   └── e2e/                # test Playwright: server giả + kịch bản
     ├── be/                     # backend
-    │   └── app/
-    │       ├── server.py       # API, migrate, tạo role, self-check
-    │       ├── migrations/     # NNN_*.sql, chạy theo thứ tự, mỗi file 1 lần
-    │       └── seed.sql        # dữ liệu mẫu (SEED_DEMO=true)
+    │   ├── app/
+    │   │   ├── server.py       # API, migrate, tạo role, self-check
+    │   │   ├── migrations/     # NNN_*.sql, chạy theo thứ tự, mỗi file 1 lần
+    │   │   ├── seed.sql        # dữ liệu mẫu (SEED_DEMO=true)
+    │   │   └── seed_orders.py  # 250 đơn giả DEMO-… (SEED_MOCK_ORDERS=true) + CLI tạo lại
+    │   └── tests/              # pytest không cần DB (đơn giả)
     └── agent/                  # trợ lý AI
         ├── src/packing_agent/
         │   ├── api.py          # POST /chat (SSE), khóa, deadline, cache thử lại, dọn state
         │   ├── agent.py        # create_agent + middleware cắt lịch sử và dự phòng
         │   ├── fallback.py     # chuỗi model dự phòng, tạm bỏ qua model bị giới hạn/lỗi cấu hình
         │   ├── tools.py        # 4 tool gọi API của BE
-        │   ├── prompts.py      # system prompt tiếng Việt
+        │   ├── prompts.py      # system prompt tiếng Việt; lọc markdown và "ạ" cuối câu (cả khi stream)
         │   ├── history.py      # chỉ gửi 4 lượt gần nhất cho model
         │   └── llm.py          # Gemini 3.1 (chính); OpenRouter, NVIDIA, Gemini 3.5, Groq (dự phòng); phân loại lỗi
         └── tests/              # pytest (+ test_postgres.py khi có TEST_DATABASE_URL)
@@ -270,10 +278,10 @@ Phản hồi là `text/event-stream`:
 | `token` | `{text}` | Một đoạn câu trả lời, chỉ để hiển thị dần. Đã bỏ markdown và "ạ" cuối câu; chữ cuối cùng được giữ lại tới mảnh sau để không lộ `**` hay "ạ" bị cắt đôi |
 | `done` | `{thread_id, answer, tools}` | Câu trả lời chính thức; thay toàn bộ text đã stream |
 | `reset` | `{}` | Bỏ chữ đã stream: model trước lỗi giữa chừng (model dự phòng trả lời lại) hoặc chữ trước khi gọi tool |
-| `error` | `{status, detail}` | 409 hội thoại đang bận · 429 quá tải · 500 lỗi lạ · 502 lỗi model · 503 bận hoặc lỗi DB · 504 quá 120 s |
+| `error` | `{status, detail}` | 409 hội thoại đang bận · 429 quá tải · 500 lỗi lạ · 502 lỗi model · 503 bận hoặc lỗi DB · 504 quá 120 s, hoặc model cuối chuỗi quá thời gian chờ |
 
-Giới hạn thời gian các lớp: một lượt 120 s; chờ lượt trước 20 s; trang bỏ cuộc sau 170 s hoặc khi 45 s không nhận được gì;
-nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kết nối không bị ngắt khi chờ.
+Giới hạn thời gian các lớp: mỗi lần gọi model chính 15 s (OpenRouter 30 s, các model khác 60 s); một lượt 120 s; chờ lượt
+trước 20 s; trang bỏ cuộc sau 170 s hoặc khi 45 s không nhận được gì; nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kết nối không bị ngắt khi chờ.
 
 ## Bảo mật
 
@@ -284,8 +292,8 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 | Database | Mỗi service một role quyền tối thiểu: `be_app` chỉ SELECT 3 bảng; `ai_app` chỉ có schema `agent`; `postgres` chỉ dùng cho `migrate`. PUBLIC bị thu hết quyền trên database (không CONNECT, không TEMP); mật khẩu role gửi dạng SCRAM, không lọt vào log. `check()` kiểm tra lại toàn bộ quyền này. SQL luôn dùng tham số; ký tự `%`/`_` trong ô tìm kiếm được escape |
 | Gateway | Rate limit `/ai/` (30/phút, burst 20); chuyển nguyên đường dẫn đã mã hóa (không giải mã `%2F`/`..`); CSP, `X-Frame-Options`, `nosniff`, `Referrer-Policy`; ẩn phiên bản nginx; chặn `/docs` và `openapi.json`; ngắt request có Host lạ |
 | Secret | `.env` và `certs/*.crt` bị git bỏ qua; image agent chỉ nhận `*.crt`, không bao giờ nhận khóa riêng; container chỉ nhận biến cần dùng |
-| Trang | Mọi nội dung hiển thị đều được escape; câu trả lời AI hiển thị bằng `textContent` (dấu markdown `**`, `#`, `*` bị agent bỏ trước khi gửi); CSV xuất ra được chặn chèn công thức |
-| Dữ liệu gửi LLM | Tool `get_order` bỏ tên khách trước khi đưa cho model (tối đa 5 hãng LLM nhận hội thoại); tên khách chỉ hiện trên màn hình. Hãng không có key thì không nằm trong chuỗi dự phòng. Lỗi của hãng chỉ ghi 200 ký tự đầu vào log. Telemetry của thư viện NVIDIA tắt |
+| Trang | Mọi nội dung hiển thị đều được escape, kể cả số lượng; câu trả lời AI hiển thị bằng `textContent` (dấu markdown `**`, `#`, `*` bị agent bỏ trước khi gửi); CSV xuất ra được chặn chèn công thức |
+| Dữ liệu gửi LLM | Tool `get_order` chỉ đưa cho model 4 trường: mã đơn, trạng thái, ngày tạo, sản phẩm. Tên khách (và cột cá nhân nào BE thêm sau này) không tới được tối đa 5 hãng LLM nhận hội thoại; tên khách chỉ hiện trên màn hình. Kết quả kiểm tra đơn gửi cho AI cũng không có tên khách. Hãng không có key thì không nằm trong chuỗi dự phòng. Lỗi của hãng chỉ ghi 200 ký tự đầu vào log. Telemetry của thư viện NVIDIA tắt |
 | Chi phí LLM | Rate limit, tối đa 8 lượt chạy cùng lúc, Gemini `max_output_tokens=1024`, NVIDIA `max_completion_tokens=4096`, Groq `max_tokens=512`. Nên đặt thêm giới hạn chi tiêu trên dashboard của nhà cung cấp |
 
 ## Kiểm thử
@@ -294,10 +302,18 @@ nginx ngắt sau 180 s không có dữ liệu. Vì có `: ping` mỗi 15 s, kế
 |---|---|---|
 | Agent (80 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
 | Agent với Postgres | `TEST_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5433/barcode_chatbot uv run pytest` | DB đang chạy; dùng schema tạm rồi xóa |
-| BE: đơn giả (không cần DB) | `cd src/barcode_chatbot/be && uv run pytest` | Chỉ cần `uv` |
-| BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test) |
+| BE: đơn giả (6 test, không cần DB) | `cd src/barcode_chatbot/be && uv run pytest` | Chỉ cần `uv` |
+| BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test, tạo rồi xóa DB tạm) |
 | Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |
 | Trang: logic quét + E2E Playwright (29 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
+
+Phạm vi self-check của BE: API qua `TestClient`, migration (mỗi file đúng 1 lần), 3 lần `migrate` chạy cùng lúc trên DB
+trống, bước khởi tạo lỗi giữa chừng vẫn báo đúng lỗi và nhả khóa `migrate`, mật khẩu role không nằm trong câu SQL, quyền
+của từng role.
+
+Phạm vi test agent: chuỗi dự phòng (cả đường bất đồng bộ mà `/chat` dùng, thời gian tạm bỏ qua cho từng loại lỗi, hãng
+thiếu key bị bỏ, thứ tự model), mã HTTP cho từng loại lỗi, log lỗi chỉ 200 ký tự và không traceback, lọc chữ stream ở mọi
+cách cắt mảnh, `reset` khi model lỗi giữa chừng hoặc viết chữ trước khi gọi tool, `get_order` không lộ tên khách.
 
 Phạm vi test logic quét (`core.test.js`): số kiểm tra GS1, đồng thuận nhiều khung hình, chống đếm trùng (món để yên,
 món rời khung rồi quay lại, nhiều mã trong khung theo thứ tự bất kỳ, món nằm yên mà tạm không đọc được).
@@ -306,7 +322,16 @@ Phạm vi E2E: kết luận do BE quyết định, QR chứa chữ không tới 
 `request_id`, stream đứt trước `done`, gộp các yêu cầu chờ, thử lại + gộp không nhận câu trả lời cũ, khóa khi đang tải đơn,
 verify lỗi → "KHÔNG niêm phong", response verify cũ về muộn không ghi đè kết luận mới, trạng thái "Đang tra kho…", quét tem đơn (mở đơn, giữa chừng không đổi đơn, đủ hàng thì mở đơn kế, tem để yên trước camera chỉ mở đơn một lần),
 mã không phải đơn được tra như sản phẩm, in checklist, checklist trong chat cập nhật theo mỗi lần quét, camera: món để yên
-đếm 1 lần, 2 món trong khung mỗi món 1 lần, lệnh giải mã treo không làm dừng quét, camera bị ngắt thì báo lỗi.
+đếm 1 lần, 2 món trong khung mỗi món 1 lần, lệnh giải mã treo không làm dừng quét, camera bị ngắt thì báo lỗi, mã chỉ
+đọc được bằng ảnh thu nhỏ vẫn được đếm, số lần đọc lại khi camera để không, tra mã đơn lỗi thì mã vẫn được đếm (hộp đủ
+không giữ khung xanh), ô ☐/☑ khi in, thẻ checklist trong chat (ẩn với trình đọc màn hình, không dời khi chỉ cập nhật),
+sự kiện `reset`.
+
+Thử trên 250 đơn giả qua stack thật (12/11/2026, script không nằm trong repo):
+- BE, cả 250 đơn × 8 trường hợp (đủ hàng, hộp trống, thiếu 1, thừa 1, món không thuộc đơn, mã lạ, mã GTIN-14):
+  2.000 request, 0 lỗi; tuần tự trung vị 5 ms, p95 30 ms; 16 luồng song song 350 request/giây, p95 62 ms.
+- Trang thật, 20 đơn rải đều: gõ từng món như người đóng gói → khung xanh, thêm 1 món → đỏ "Lấy ra khỏi hộp": 20/20.
+- AI, 3 đơn: nêu đủ sản phẩm, không lộ tên khách, giải thích đúng món còn thiếu: 6/6.
 
 Độ ổn định của camera với bộ giải mã thật được đo thủ công bằng video giả lập (`--use-file-for-fake-video-capture`):
 mã EAN-13 ở 15 điều kiện (đứng yên, xa 15–25% khung, lệch góc, nghiêng 20/45/60/90°, rung, mờ, tối + nhiễu, mờ + tối,
@@ -360,6 +385,8 @@ Lỗi thường gặp:
   trang báo "move a little closer". Màn hình đứng hình thì bấm tắt rồi bật lại camera.
 - **Một món bị đếm 2 lần:** món bị lấy ra khỏi khung hơn 0,7 s rồi đưa lại, hoặc camera tự chỉnh sáng mạnh làm cả khung
   đổi màu. Lấy món thừa ra theo khung kết quả (BE báo "Lấy ra khỏi hộp"), hoặc bấm "Quét lại từ đầu".
+- **Chat chậm (10–30 s), log có `LLM gemini-… quá thời gian chờ` hoặc `Trả lời bằng model dự phòng`:** Gemini đang
+  chậm hoặc lỗi (504/503 phía Google), câu trả lời do model dự phòng đưa ra. Gemini được thử lại sau 2 phút.
 - **AI báo 429 liên tục:** rate limit của gateway hoặc hết quota của nhà cung cấp LLM. Xem `docker compose logs ai | grep "rate limit"`.
 
 ## Giới hạn hiện tại
@@ -374,6 +401,8 @@ Lỗi thường gặp:
 - Camera mới được đo bằng video giả lập, chưa thử với camera và tem thật; tự lấy nét chưa kiểm được (camera giả không có).
 - Phần so khung hình 32×24 (món nằm yên mà tạm không đọc được) chưa có test tự động; camera giả của Playwright chiếu
   hình động nên luôn bị coi là đã đổi. Camera tự chỉnh sáng mạnh cũng bị coi là đổi khung, khi đó quay về đếm theo thời gian.
-- Khi không có mã trong khung, mỗi khung hình chạy cả 5 cách đọc: tốn CPU hơn, điện thoại yếu có thể nóng.
+- Các cách đọc lại tốn CPU: chạy mỗi khung trong 2 s sau lần đọc được mã, sau đó 1/3 số khung. Chưa đo trên điện thoại.
+- Thời gian chờ 15 s của Gemini mới đo trong một buổi Gemini đang chậm. Lỗi 503 của Gemini chưa làm nó bị tạm bỏ qua.
+- Đơn giả `DEMO-…` có ngày tạo tính lùi từ lúc nạp, nên file `--sql-out` mỗi lần chạy khác nhau ở cột ngày.
 - Mã đơn toàn số mà trùng dạng mã vạch sản phẩm hợp lệ sẽ bị đọc là sản phẩm; đơn kiểu đó phải nhập tay.
 - Chưa in được tem mã vạch cho đơn; tem đơn phải in từ hệ thống khác.
