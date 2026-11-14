@@ -36,6 +36,9 @@ def test_mock_ids_can_never_be_real_order_ids():
 def test_sql_export_escapes_quotes():
     sql = so.to_sql([("DEMO-000001", "O'Brien", 'pending', NOW)], [("DEMO-000001", "X'Y", 2)])
     assert "'O''Brien'" in sql and "'X''Y'" in sql and "standard_conforming_strings" in sql
+    lines = sql.strip().splitlines()
+    assert lines[1] == 'BEGIN;' and lines[-1] == 'COMMIT;'
+    assert all(l.endswith('DO NOTHING;') for l in lines if l.startswith('INSERT'))  # never overwrites a row
 
 
 class FakeConn:
@@ -50,6 +53,7 @@ class FakeConn:
 
     def execute(self, q, params=None):
         self.sql.append(q)
+        self.params = getattr(self, 'params', []) + [params]
         self.rows = ([(s,) for s in self.skus] if 'FROM products' in q
                      else [(i,) for i in params[0] if i in self.existing] if 'ANY' in q else [])
         return self
@@ -72,8 +76,9 @@ def test_insert_uses_in_stock_products_and_leaves_existing_orders_alone():
 def test_clean_deletes_only_mock_ids():
     conn = FakeConn(SKUS)
     so.insert(conn, count=2, clean=True)
-    delete = [q for q in conn.sql if 'DELETE' in q]
-    assert delete == ["DELETE FROM orders WHERE order_id ~ %s"]
+    i = [n for n, q in enumerate(conn.sql) if 'DELETE' in q]
+    assert [conn.sql[n] for n in i] == ["DELETE FROM orders WHERE order_id ~ %s"]
+    assert conn.params[i[0]] == (so.MOCK_ID,)               # the pattern actually sent, not just the SQL text
 
 
 def test_too_few_products_in_stock():
@@ -82,3 +87,79 @@ def test_too_few_products_in_stock():
     conn = FakeConn(['HD-1001'])
     assert so.insert(conn, strict=False) == ([], [], [])    # migrate: skipped, the stack still starts
     assert conn.many == {}
+
+
+@pytest.mark.parametrize('flag', [False, True])
+def test_mock_orders_only_when_seed_mock_orders_is_on(monkeypatch, flag):
+    from app import server
+    calls = []
+    monkeypatch.setattr(server, 'migrate', lambda conn: [])
+    monkeypatch.setattr(server, 'provision_roles', lambda conn: None)
+    monkeypatch.setattr(server.seed_orders, 'insert', lambda conn, **kw: calls.append(kw) or (['DEMO-000001'], [], []))
+    monkeypatch.setattr(server, 'SEED_DEMO', True)
+    monkeypatch.setattr(server, 'SEED_MOCK_ORDERS', flag)
+
+    class Conn:
+        def execute(self, *a, **k): return self
+        def commit(self): pass
+        def rollback(self): pass
+    server._setup(Conn())
+    assert calls == ([{'strict': False}] if flag else [])
+
+
+def test_seed_mock_orders_is_off_by_default(monkeypatch):
+    import importlib
+    from app import server
+    monkeypatch.delenv('SEED_MOCK_ORDERS', raising=False)
+    monkeypatch.setattr('dotenv.load_dotenv', lambda *a, **k: False)  # the developer's own .env may turn it on
+    try:
+        assert importlib.reload(server).SEED_MOCK_ORDERS is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(server)
+
+
+
+@pytest.mark.parametrize('url,ok', [
+    ('postgresql://postgres:x@127.0.0.1:5433/barcode_chatbot', True),
+    ('postgresql://postgres:x@db:5432/barcode_chatbot', True),
+    ('postgresql://postgres:x@localhost/barcode_chatbot', True),
+    ('postgresql:///barcode_chatbot', True),                                  # local socket
+    ('postgresql://postgres:x@prod-db.example.com/barcode_chatbot', False),
+    ('postgresql://postgres:x@10.0.0.5:5432/barcode_chatbot', False),
+])
+def test_self_check_refuses_a_remote_database(monkeypatch, url, ok):
+    from app import server
+    monkeypatch.delenv('ALLOW_SELF_CHECK', raising=False)
+    if ok:
+        server.check_target_is_local(url)
+    else:
+        with pytest.raises(SystemExit):
+            server.check_target_is_local(url)
+        monkeypatch.setenv('ALLOW_SELF_CHECK', '1')
+        server.check_target_is_local(url)                                     # explicit opt-in
+
+
+def test_mock_orders_seeding_warns(monkeypatch, capsys):
+    from app import server
+    monkeypatch.setattr(server, 'migrate', lambda conn: [])
+    monkeypatch.setattr(server, 'provision_roles', lambda conn: None)
+    monkeypatch.setattr(server.seed_orders, 'insert', lambda conn, **kw: (['DEMO-000001'], [1, 2], []))
+    monkeypatch.setattr(server, 'SEED_DEMO', False)
+    monkeypatch.setattr(server, 'SEED_MOCK_ORDERS', True)
+
+    class Conn:
+        def execute(self, *a, **k): return self
+        def commit(self): pass
+        def rollback(self): pass
+    server._setup(Conn())
+    assert 'SEED_MOCK_ORDERS=true: 1 new fake orders' in capsys.readouterr().err
+
+
+def test_check_starts_with_the_local_database_guard(monkeypatch):
+    from app import server
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://postgres:x@prod-db.example.com/barcode_chatbot')
+    monkeypatch.delenv('ALLOW_SELF_CHECK', raising=False)
+    monkeypatch.setattr(server, 'check_migrations', lambda: pytest.fail('check() touched the database before the guard'))
+    with pytest.raises(SystemExit):
+        server.check()

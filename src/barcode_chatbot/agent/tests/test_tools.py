@@ -66,4 +66,5 @@ def test_get_order_hides_the_customer_name(monkeypatch):
     monkeypatch.setattr(tools, 'client', httpx.Client(base_url='http://be', transport=httpx.MockTransport(
         lambda r: httpx.Response(200, json=order))))
     out = tools.get_order.invoke({'order_id': 'SO-1'})
-    assert 'Nguyễn' not in out and '0901' not in out and json.loads(out)['order_id'] == 'SO-1'
+    assert 'Nguyễn' not in out and '0901' not in out
+    assert json.loads(out) == {'order_id': 'SO-1', 'status': 'pending', 'items': []}  # what the agent needs stays

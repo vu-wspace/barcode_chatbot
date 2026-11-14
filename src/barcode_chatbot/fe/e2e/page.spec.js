@@ -26,7 +26,8 @@ test.beforeEach(async ({ page, request }) => {
         const cam = () => [].concat(window.__cam || []).map((value) => ({ value, format: 'ean_13' }));
         const half = src instanceof HTMLCanvasElement && src.width === Math.round(document.getElementById('video').videoWidth / 2);
         const v = src instanceof HTMLVideoElement ? (window.__camOnly ? [] : cam())
-          : src instanceof HTMLCanvasElement ? (window.__camOnly === 'half' && half ? cam() : [])
+          : src instanceof HTMLCanvasElement ? ((window.__camOnly === 'half' && half) ||
+              (window.__camOnly === 'rot' && src.getContext('2d').getTransform().b !== 0) ? cam() : [])
           : [].concat(window.__codes.shift() || []);
         return Promise.resolve(v.map((c) => ({ rawValue: c.value, format: c.format, boundingBox: { x: 0, y: 0, width: 400, height: 100 } })));
       }
@@ -460,5 +461,46 @@ test('camera without an order: the next item and the same item shown again are b
   await expect.poll(seen, { timeout: 4000 }).toBe(3);
   await page.waitForTimeout(3000);                                    // held still: not counted again
   expect(await seen()).toBe(3);
+  await page.click('#stopBtn');
+});
+
+
+test('camera: after a read that needed the ±45° retry, idle frames do not run only that rotated decode', async ({ page }) => {
+  await loadOrder(page);
+  await page.click('#startBtn');
+  await page.evaluate(() => { window.__camOnly = 'rot'; window.__cam = '8935000100011'; });
+  await expect(page.locator('#order li', { hasText: 'HD-1001' })).toContainText('1/1 ✓', { timeout: 15000 });
+  await page.evaluate(() => { window.__cam = null; window.__camOnly = null; });
+  await page.waitForTimeout(3500);                       // past the 2 s window: idle throttle
+  await page.evaluate(() => { window.__plainReads = 0; window.__retryReads = 0; });
+  await page.waitForTimeout(1500);
+  const r = await page.evaluate(() => ({ p: window.__plainReads, x: window.__retryReads }));
+  expect(r.p).toBeGreaterThan(5);                        // the plain read runs on every idle frame
+  expect(r.x).toBeLessThanOrEqual(Math.ceil(r.p / 3) * 4 + 4);
+  await page.click('#stopBtn');
+});
+
+test('camera: a decode chain abandoned by the 3 s timeout does not change which retry goes first', async ({ page }) => {
+  await loadOrder(page);
+  await page.evaluate(() => {
+    const D = window.BarcodeDetector.prototype.detect;
+    let held = false;
+    window.BarcodeDetector.prototype.detect = function (src) {
+      if (!held && src instanceof HTMLCanvasElement && window.__holdHalf) {   // first retry: answers only after 3.5 s
+        held = true;
+        return new Promise((ok) => setTimeout(() => ok([{ rawValue: '8935000100011', format: 'ean_13', boundingBox: null }]), 3500));
+      }
+      return D.call(this, src);
+    };
+  });
+  await page.click('#startBtn');
+  await page.evaluate(() => { window.__holdHalf = true; window.__cam = null; });
+  await page.waitForTimeout(6500);   // the late answer (~3.5 s after it was asked) has arrived; any 2 s window it opened is over
+  await page.evaluate(() => { window.__plainReads = 0; window.__retryReads = 0; });
+  await page.waitForTimeout(1500);
+  const r = await page.evaluate(() => ({ p: window.__plainReads, x: window.__retryReads }));
+  // the plain read still goes first: had the stale answer set the half-size retry first, idle frames would run only it
+  expect(r.p).toBeGreaterThan(r.x / 2);
+  await expect(page.locator('#order li', { hasText: 'HD-1001' })).toContainText('0/1');  // the late answer is not counted
   await page.click('#stopBtn');
 });

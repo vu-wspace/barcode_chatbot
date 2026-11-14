@@ -11,14 +11,20 @@ INSERT INTO products (sku, barcode, name, category, price, stock) VALUES
     ('CLASSMATE-NB', '8936212227992', 'Vở ClassMate', 'Văn phòng phẩm', 15000, 150)
 ON CONFLICT DO NOTHING;
 
-INSERT INTO orders (order_id, customer) VALUES
-    ('SO-104587', 'Nguyễn Văn A'),
-    ('SO-104588', 'Trần Thị B'),
-    -- box X55277605433 from the old barcode_cv system (mock_checklist.json / its boxes + checklist_items tables)
-    ('X55277605433', '')
-ON CONFLICT DO NOTHING;
-
-INSERT INTO order_items (order_id, sku, quantity) VALUES
+-- Order lines go only to the demo orders this statement created: an order with the same id that already exists
+-- (a real one, or a demo order edited by hand) never gets demo lines added to its checklist.
+WITH new AS (
+    INSERT INTO orders (order_id, customer) VALUES
+        ('SO-104587', 'Nguyễn Văn A'),
+        ('SO-104588', 'Trần Thị B'),
+        -- box X55277605433 from the old barcode_cv system (mock_checklist.json / its boxes + checklist_items tables)
+        ('X55277605433', '')
+    ON CONFLICT DO NOTHING
+    RETURNING order_id
+)
+INSERT INTO order_items (order_id, sku, quantity)
+SELECT v.order_id, v.sku, v.quantity
+FROM (VALUES
     ('SO-104587', 'HD-1001', 1),
     ('SO-104587', 'CH-2001', 1),
     ('SO-104587', 'CB-3001', 1),
@@ -26,4 +32,5 @@ INSERT INTO order_items (order_id, sku, quantity) VALUES
     ('SO-104588', 'SALONPAS', 3),
     ('X55277605433', 'SALONPAS', 1),
     ('X55277605433', 'CLASSMATE-NB', 3)
-ON CONFLICT DO NOTHING;
+) AS v(order_id, sku, quantity)
+JOIN new USING (order_id);

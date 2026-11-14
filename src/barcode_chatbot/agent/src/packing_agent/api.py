@@ -237,6 +237,7 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                 n_before = len((await agent.aget_state(config)).values.get('messages', []))
                 sent_tools = set()
                 cleaner, msg_id = StreamCleaner(), None  # one per model call: each call's text is its own answer
+                muted = None  # id of a message that already started a tool call: its further text is not shown
                 async for msg, meta in agent.astream({'messages': [{'role': 'user', 'content': req.message}]},
                                                      config, stream_mode='messages'):
                     if meta.get('langgraph_node') != 'model':
@@ -248,14 +249,14 @@ async def run_turn(app, req: ChatRequest, thread_id: str, request_id: str, out: 
                         if cleaner.sent:
                             await out.put(sse('reset', {}))
                         cleaner, msg_id = StreamCleaner(), msg.id
-                    if msg.text and (piece := cleaner.push(msg.text)):  # the stored answer is cleaned by the
+                    if msg.text and msg.id != muted and (piece := cleaner.push(msg.text)):  # stored answer: cleaned by the
                         await out.put(sse('token', {'text': piece}))  # middleware; clean the live pieces too
                     for tc in (getattr(msg, 'tool_call_chunks', None) or getattr(msg, 'tool_calls', None) or []):
                         if tc.get('name') and tc.get('id') not in sent_tools:
                             sent_tools.add(tc.get('id'))
                             if cleaner.sent:
                                 await out.put(sse('reset', {}))
-                            cleaner = StreamCleaner()  # a held-back word of the pre-tool text is dropped too
+                            cleaner, muted = StreamCleaner(), msg.id  # a held-back word of the pre-tool text goes too
                             await out.put(sse('tool', {'name': tc['name']}))
                 if tail := cleaner.flush():
                     await out.put(sse('token', {'text': tail}))

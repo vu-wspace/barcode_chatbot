@@ -50,7 +50,8 @@ google_llm = ChatGoogleGenerativeAI(
     model='gemini-3.1-flash-lite',
     temperature=0,
     max_output_tokens=1024,  # trần chi phí mỗi lần gọi; câu trả lời thực tế dưới 300 token
-    # Model chính: treo (lỗi 504 DEADLINE_EXCEEDED) thì không thử lại mà chuyển ngay model dự phòng.
+    # Model chính: không thử lại với mọi lỗi (treo 504 DEADLINE_EXCEEDED, 500/503 thoáng qua) mà chuyển ngay model
+    # dự phòng: người đóng gói chờ ít hơn, đổi lại câu đó do hãng khác trả lời.
     # Đo 12/11/2026, 8 câu qua agent: deadline 15 s -> 0 lỗi, trung vị 6.5 s; 10 s -> 5/8 lỗi (Gemini chậm hôm đó).
     # Dưới 10 s Gemini từ chối mọi request (400 "Minimum allowed deadline is 10s").
     timeout=15,
@@ -87,9 +88,9 @@ def _has_key(*names: str) -> bool:
 
 # Model chính hỏng/hết quota thì thử lần lượt các model này (xem fallback.py). Hãng không có key thì bỏ hẳn khỏi
 # chuỗi: thư viện NVIDIA vẫn gửi request (cả hội thoại) khi thiếu key, chỉ in cảnh báo.
-FALLBACK_LLMS = [m for m, var in [(open_llm, 'OPENROUTER_API_KEY'), (nvidia_llm, 'NVIDIA_API_KEY'),
-                                  (google_llm_alt, ('GOOGLE_API_KEY', 'GEMINI_API_KEY')),
-                                  (groq_llm, 'GROQ_API_KEY')] if _has_key(*([var] if isinstance(var, str) else var))]
+FALLBACK_LLMS = [m for m, keys in [(open_llm, ('OPENROUTER_API_KEY',)), (nvidia_llm, ('NVIDIA_API_KEY',)),
+                                   (google_llm_alt, ('GOOGLE_API_KEY', 'GEMINI_API_KEY')),
+                                   (groq_llm, ('GROQ_API_KEY',))] if _has_key(*keys)]
 
 def model_name(llm) -> str:
     return getattr(llm, 'model', None) or getattr(llm, 'model_name', None) or type(llm).__name__

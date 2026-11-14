@@ -456,7 +456,8 @@
     renderResult(S.history[0]); renderHistory();
     toast('Scanned: ' + value); beep(); if (navigator.vibrate) navigator.vibrate(80);
     if (S.order) { S.scans.push(value); verifyOrder(); }
-    else if (SAFE_CODE.test(value)) askAI('Vừa quét mã ' + value + '. Đây là sản phẩm gì?');
+    // key 'scan': fast scanning replaces the question still waiting, so the queue and the LLM quota do not fill up
+    else if (SAFE_CODE.test(value)) askAI('Vừa quét mã ' + value + '. Đây là sản phẩm gì?', 'scan');
   }
   // Barcodes/SKUs only. Anything else (QR text, URLs) is shown locally but never put into an AI prompt or an order.
   var SAFE_CODE = /^[A-Za-z0-9-]{1,64}$/;

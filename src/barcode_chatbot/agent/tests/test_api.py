@@ -318,3 +318,40 @@ def test_text_before_a_tool_call_is_reset_when_the_tool_starts(client, monkeypat
     assert names.index('token') < names.index('reset') < names.index('tool')  # placeholder shows during the lookup
     after = names.index('tool')
     assert ''.join(d['text'] for e, d in events[after:] if e == 'token') == dict(events)['done']['answer']
+
+
+class ChunkModel(FakeModel):
+    """Streams the given AIMessageChunk lists, one list per model call (the real streamed path)."""
+    calls: list = []
+
+    def _stream(self, *a, **kw):
+        from langchain_core.outputs import ChatGenerationChunk
+        for c in self.calls.pop(0):
+            yield ChatGenerationChunk(message=c)
+
+
+@pytest.mark.parametrize('same_chunk', [False, True])
+def test_streamed_text_then_tool_call_in_one_message(client, monkeypatch, same_chunk):
+    from langchain_core.messages import AIMessageChunk
+    tc = [{'name': 'get_product', 'args': '{"code": "8935000100011"}', 'id': 'c1', 'index': 0}]
+    first = ([AIMessageChunk(content='Dạ để em '), AIMessageChunk(content='tra cứu nha ', tool_call_chunks=tc)] if same_chunk
+             else [AIMessageChunk(content='Dạ để em tra cứu nha '), AIMessageChunk(content='', tool_call_chunks=tc)])
+    use(monkeypatch, ChunkModel(messages=iter([]), calls=[first, [AIMessageChunk(content='Dạ, còn 25 cái nha.')]]))
+    events = chat(client, message='hi', thread_id=str(uuid.uuid4()), request_id=str(uuid.uuid4()))
+    names = [e for e, _ in events]
+    assert names.count('reset') == 1 and names.index('reset') < names.index('tool')
+    after = names.index('tool')
+    assert ''.join(d['text'] for e, d in events[after:] if e == 'token') == dict(events)['done']['answer']
+
+
+
+def test_text_after_the_tool_call_in_the_same_message_is_not_shown(client, monkeypatch):
+    from langchain_core.messages import AIMessageChunk
+    tc = [{'name': 'get_product', 'args': '{"code": "8935000100011"}', 'id': 'c1', 'index': 0}]
+    first = [AIMessageChunk(content='Dạ để em xem ', tool_call_chunks=tc), AIMessageChunk(content='chờ em chút nha ')]
+    use(monkeypatch, ChunkModel(messages=iter([]), calls=[first, [AIMessageChunk(content='Dạ, còn 25 cái nha.')]]))
+    events = chat(client, message='hi', thread_id=str(uuid.uuid4()), request_id=str(uuid.uuid4()))
+    names = [e for e, _ in events]
+    between = events[names.index('tool'):]
+    shown = ''.join(d['text'] for e, d in between if e == 'token')
+    assert 'chờ em' not in shown and shown == dict(events)['done']['answer']

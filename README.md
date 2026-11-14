@@ -47,7 +47,8 @@ lời câu hỏi về sản phẩm và đơn hàng.
   - Khung chat: thẻ "📦 Checklist đơn" với cùng nội dung, sửa tại chỗ và dời xuống cuối sau mỗi lần quét; mỗi đơn một thẻ,
     thẻ của đơn trước giữ lại tình trạng lúc chuyển đơn. Thẻ ẩn với trình đọc màn hình (khung Đơn đã đọc kết quả).
   - Nút "In checklist": in riêng danh sách đơn (nền trắng chữ đen), mỗi dòng có ô ☐ để đánh dấu tay, dòng đã đủ in ☑.
-- **Trợ lý AI (tiếng Việt):** câu trả lời stream theo thời gian thực (SSE). AI dùng 4 tool gọi API của BE:
+- **Trợ lý AI (tiếng Việt):** quét mã khi chưa mở đơn thì AI cho biết đó là sản phẩm gì; quét nhanh nhiều mã thì chỉ hỏi về
+  mã mới nhất (câu đang chờ được thay). Câu trả lời stream theo thời gian thực (SSE). AI dùng 4 tool gọi API của BE:
   `get_product`, `search_products`, `get_order`, `verify_order`. Lịch sử hội thoại lưu trong Postgres. AI không nhận
   tên khách (xem [Bảo mật](#bảo-mật)): hỏi "đơn này của ai" thì AI nhờ xem trên màn hình đơn.
 - **Ổn định:** hủy lượt khi client ngắt kết nối, giới hạn thời gian mỗi lượt, mỗi hội thoại chạy từng lượt một
@@ -239,8 +240,8 @@ Tạo lại: `cd src/barcode_chatbot/be && uv run python -m app.seed_orders --cl
 | `NVIDIA_API_KEY` | | ai | NVIDIA, model dự phòng thứ 2. Để trống thì NVIDIA bị bỏ khỏi chuỗi dự phòng (không gửi gì tới NVIDIA) |
 | `GROQ_API_KEY` | | ai | Groq, model dự phòng cuối cùng. Để trống hoặc `unused` thì bị bỏ khỏi chuỗi |
 | `LANGSMITH_API_KEY`, `LANGSMITH_TRACING`, `LANGSMITH_PROJECT` | | ai | Tracing. `true` sẽ gửi cả hội thoại lên LangSmith |
-| `SEED_DEMO` | | migrate | `true` (mặc định) nạp dữ liệu mẫu; không ghi đè dòng đã sửa |
-| `SEED_MOCK_ORDERS` | | migrate | `true` nạp thêm 250 đơn giả `DEMO-…`; mặc định `false` |
+| `SEED_DEMO` | | migrate | `true` (mặc định) nạp dữ liệu mẫu; không ghi đè dòng đã sửa và không thêm dòng sản phẩm vào đơn đã có sẵn cùng mã. Bản triển khai thật nên đặt `false` |
+| `SEED_MOCK_ORDERS` | | migrate | `true` nạp thêm 250 đơn giả `DEMO-…`; mặc định `false`. Khi bật, log của `migrate` in `WARNING: SEED_MOCK_ORDERS=true` để không lỡ bật trên máy thật |
 | `GATE_PORT` | | gate | Cổng trên máy, mặc định `8080` |
 | `DATABASE_URL` | | chạy BE ngoài Docker | Dùng `127.0.0.1:5433`, không dùng `localhost` |
 | `DOCS` | | be, ai | `true` bật `/docs` và `openapi.json` khi phát triển; mặc định tắt |
@@ -278,7 +279,7 @@ Phản hồi là `text/event-stream`:
 | `tool` | `{name}` | Agent bắt đầu gọi một tool |
 | `token` | `{text}` | Một đoạn câu trả lời, chỉ để hiển thị dần. Đã bỏ markdown và "ạ" cuối câu; chữ cuối cùng được giữ lại tới mảnh sau để không lộ `**` hay "ạ" bị cắt đôi |
 | `done` | `{thread_id, answer, tools}` | Câu trả lời chính thức; thay toàn bộ text đã stream |
-| `reset` | `{}` | Bỏ chữ đã stream: model trước lỗi giữa chừng (model dự phòng trả lời lại) hoặc chữ trước khi gọi tool |
+| `reset` | `{}` | Bỏ chữ đã stream: model trước lỗi giữa chừng (model dự phòng trả lời lại) hoặc chữ trước khi gọi tool. Chữ model viết sau khi gọi tool trong cùng tin nhắn không được gửi |
 | `error` | `{status, detail}` | 409 hội thoại đang bận · 429 quá tải · 500 lỗi lạ · 502 lỗi model · 503 bận hoặc lỗi DB · 504 quá 120 s, hoặc model cuối chuỗi quá thời gian chờ |
 
 Giới hạn thời gian các lớp: mỗi lần gọi model chính 15 s (OpenRouter 30 s, các model khác 60 s); một lượt 120 s; chờ lượt
@@ -301,12 +302,12 @@ trước 20 s; trang bỏ cuộc sau 170 s hoặc khi 45 s không nhận đượ
 
 | Bộ test | Lệnh | Cần |
 |---|---|---|
-| Agent (80 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
+| Agent (83 test, gồm 3 test Postgres) | `cd src/barcode_chatbot/agent && uv run pytest` | Không cần LLM, BE hay DB (test Postgres tự bỏ qua) |
 | Agent với Postgres | `TEST_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5433/barcode_chatbot uv run pytest` | DB đang chạy; dùng schema tạm rồi xóa |
-| BE: đơn giả (6 test, không cần DB) | `cd src/barcode_chatbot/be && uv run pytest` | Chỉ cần `uv` |
-| BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test, tạo rồi xóa DB tạm) |
+| BE: đơn giả, cờ seed, chặn self-check DB ngoài máy (17 test, không cần DB) | `cd src/barcode_chatbot/be && uv run pytest` | Chỉ cần `uv` |
+| BE + migration (self-check) | `docker compose run --rm migrate python -m app.server check` | Stack đang chạy; quyền chủ DB (có ghi rồi xóa dòng test, tạo rồi xóa DB tạm). Chỉ chạy khi `DATABASE_URL` trỏ tới máy này hoặc service `db`; DB ở máy khác thì từ chối, trừ khi đặt `ALLOW_SELF_CHECK=1` |
 | Gateway thật (header + giải mã ảnh barcode thật bằng polyfill) | `cd src/barcode_chatbot/fe && npm run test:gate` | Stack đang chạy và mạng tới jsdelivr; bắt được lỗi CSP/cache làm hỏng máy quét |
-| Trang: logic quét + E2E Playwright (30 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
+| Trang: logic quét + E2E Playwright (32 test) | `cd src/barcode_chatbot/fe && npm ci && npx playwright install chromium && npm test` | Chỉ cần Node; server giả cho BE và AI |
 
 Phạm vi self-check của BE: API qua `TestClient`, migration (mỗi file đúng 1 lần), 3 lần `migrate` chạy cùng lúc trên DB
 trống, bước khởi tạo lỗi giữa chừng vẫn báo đúng lỗi và nhả khóa `migrate`, mật khẩu role không nằm trong câu SQL, quyền

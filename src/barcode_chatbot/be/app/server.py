@@ -149,8 +149,11 @@ def _setup(conn) -> list[str]:
             conn.execute((HERE / "seed.sql").read_text(encoding="utf-8"))
             conn.commit()
         if SEED_MOCK_ORDERS:
-            seed_orders.insert(conn, strict=False)  # same orders every time, existing ones untouched
+            new, orders, _ = seed_orders.insert(conn, strict=False)  # same orders every time, existing ones untouched
             conn.commit()
+            # loud on purpose: a .env copied from a dev machine would put fake orders into a real orders table
+            print(f"WARNING: SEED_MOCK_ORDERS=true: {len(new)} new fake orders DEMO-... ({len(orders)} in the set); "
+                  "set SEED_MOCK_ORDERS=false on a real deployment", file=sys.stderr)
         provision_roles(conn)
         return ran
     finally:
@@ -369,9 +372,24 @@ def check_failed_setup_releases_lock():
             admin.execute("DROP DATABASE IF EXISTS setup_fail_check WITH (FORCE)")
 
 
+CHECK_HOSTS = {"127.0.0.1", "localhost", "::1", "db"}  # this machine, or the compose service
+
+
+def check_target_is_local(url: str) -> None:
+    """check() creates and force-drops scratch databases and writes test rows as the DB owner: refuse a remote
+    DATABASE_URL (a production database by mistake) unless ALLOW_SELF_CHECK=1 says it was meant."""
+    from psycopg.conninfo import conninfo_to_dict
+
+    host = conninfo_to_dict(url).get("host") or "localhost"  # no host = local socket
+    if host not in CHECK_HOSTS and os.getenv("ALLOW_SELF_CHECK") != "1":
+        raise SystemExit(f"self-check refused: DATABASE_URL host {host!r} is not local (set ALLOW_SELF_CHECK=1 to run anyway)")
+
+
 def check():
     """Self-check through the HTTP API against DATABASE_URL, using the demo data (SEED_DEMO=true)."""
     from fastapi.testclient import TestClient
+
+    check_target_is_local(os.environ["DATABASE_URL"])
 
     assert compare({"A": 2, "B": 1}, {"A": 1, "C": 1}) == ({"A": 1, "B": 1}, {"C": 1})
     assert compare({"A": 1}, {"A": 3}) == ({}, {"A": 2})

@@ -137,6 +137,10 @@ def test_providers_without_a_key_are_left_out_of_the_chain(monkeypatch):
         importlib.reload(llm)
         assert llm.MAIN_LLM is llm.google_llm
         assert llm.FALLBACK_LLMS == [llm.open_llm, llm.nvidia_llm, llm.google_llm_alt, llm.groq_llm]  # measured order
+        monkeypatch.delenv('GOOGLE_API_KEY')
+        monkeypatch.setenv('GEMINI_API_KEY', 'k')
+        importlib.reload(llm)
+        assert llm.google_llm_alt in llm.FALLBACK_LLMS          # the Gemini SDK also reads GEMINI_API_KEY
     finally:
         monkeypatch.undo()
         importlib.reload(llm)
