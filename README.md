@@ -10,6 +10,7 @@ lời câu hỏi về sản phẩm và đơn hàng.
 
 ## Mục lục
 
+- [Video demo](#video-demo)
 - [Tính năng](#tính-năng)
 - [Kiến trúc](#kiến-trúc)
 - [Luồng xử lý](#luồng-xử-lý)
@@ -22,6 +23,17 @@ lời câu hỏi về sản phẩm và đơn hàng.
 - [Thay đổi database (migration)](#thay-đổi-database-migration)
 - [Vận hành](#vận-hành)
 - [Giới hạn hiện tại](#giới-hạn-hiện-tại)
+
+## Video demo
+
+[![Video demo: quét đơn X55277605433 bằng camera, checklist cập nhật, AI giải thích kết quả](video/video_blur_mat.jpg)](video/video_blur_mat.mp4)
+
+▶ [Xem video](video/video_blur_mat.mp4) (`video/video_blur_mat.mp4`, 1 phút, 1920×1080, mặt người đã làm mờ).
+Trong video: bật camera, mở đơn `X55277605433`, quét miếng dán Salonpas → checklist (khung Đơn và thẻ trong chat) chuyển
+`1/1 ✓`, khung kết quả đỏ "Chưa niêm phong. Còn thiếu: Vở ClassMate ×3", thẻ sản phẩm hiện tên, giá, tồn kho, và trợ lý AI
+giải thích cần làm gì tiếp.
+
+> GitHub không phát được video nằm trong repo ngay trong README: bấm vào ảnh hoặc link để mở trình phát của GitHub.
 
 ## Tính năng
 
@@ -177,6 +189,7 @@ Nếu một migration lỗi, `migrate` thoát với mã khác 0 và `be`, `ai` k
 ```
 .
 ├── docker-compose.yml          # db, migrate, be, ai, gate
+├── video/                      # video demo + ảnh bìa dùng trong README
 ├── .env.example                # mẫu biến môi trường
 └── src/barcode_chatbot/
     ├── fe/                     # trang quét + gateway nginx
